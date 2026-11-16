@@ -53,6 +53,7 @@ ROOMS = {
     "devroom": {"t": "p", "name": "amiga-dev", "fname": "Amiga Dev"},
     "uid-aliceuid-tommy": {"t": "d", "name": "alice", "fname": "Alice"},
     "emptyroom": {"t": "c", "name": "empty", "fname": None},
+    "atroom": {"t": "p", "name": "@zeta-group", "fname": None},
 }
 SUBS = {}       # rid -> subscription dict (single user model: tommy/secure share)
 MESSAGES = {}   # rid -> list of message dicts
@@ -77,6 +78,8 @@ def seed():
                      "_updatedAt": iso(T0)}
         if r["fname"]:
             SUBS[rid]["fname"] = r["fname"]
+        if rid == "GENERAL":
+            SUBS[rid]["f"] = True
         MESSAGES[rid] = []
         DELETED[rid] = []
     g = MESSAGES["GENERAL"]
@@ -90,6 +93,7 @@ def seed():
                       file={"_id": "f1", "name": "screenshot.png", "type": "image/png"}))
     g.append(make_msg("GENERAL", "tommy", "edited text", T0 + 43000, editedAt=iso(T0 + 44000)))
     g.append(make_msg("GENERAL", "alice", "reply in thread", T0 + 45000, tmid=g[1]["_id"]))
+    g.append(make_msg("GENERAL", "alice", "*bold* and _it_ :smile: see [docs](https://x.org/a_b) ```code_here```", T0 + 46000))
     MESSAGES["devroom"].append(make_msg("devroom", "tommy", "AmiSSL works on 68020", T0 + 5000))
     MESSAGES["uid-aliceuid-tommy"].append(make_msg("uid-aliceuid-tommy", "alice", "hi tommy", T0 + 6000))
     SUBS["uid-aliceuid-tommy"]["unread"] = 1

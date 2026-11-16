@@ -98,10 +98,11 @@ def test_basic():
 
         rc, out, err = rcli(*login_args(m), "rooms")
         lines = out.strip().splitlines()
-        check(rc == 0 and len(lines) == 4, "rooms listed", out + err)
-        check([l.split()[1] for l in lines] == ["amiga-dev", "empty", "general", "alice"],
-              "rooms sorted: channels by title, then DMs", out)
-        check("unread=1 alert" in lines[3], "DM unread/alert parsed", out)
+        check(rc == 0 and len(lines) == 5, "rooms listed", out + err)
+        check([l.split()[1] for l in lines] == ["amiga-dev", "empty", "general", "@zeta-group", "alice"],
+              "rooms sorted: channels by title ignoring punctuation, then DMs", out)
+        check("unread=1 alert" in lines[4], "DM unread/alert parsed", out)
+        check(" fav " in lines[2] and " fav " not in lines[0], "favourite flag parsed", out)
 
         rc, out, err = rcli(*login_args(m), "history", "general", "20")
         lines = entries(out)
@@ -116,6 +117,7 @@ def test_basic():
 
         rc, out, err = rcli("-L", *login_args(m), "history", "#general", "20")
         check("Hej p\u00e5 dig 'quoted' \"double\" - caf\u00e9 :D EUR5" in out, "Latin-1 conversion", out)
+        check("bold and it :) see docs (https://x.org/a_b) code_here" in out, "markup removed as in the GUI", out)
 
         rc, out, err = rcli(*login_args(m), "history", "general", "50")
         check(rc == 0 and "* joined the room" in out, "system message text", out)
@@ -145,7 +147,7 @@ def test_basic():
         kv = dict(l.split("=", 1) for l in out.strip().splitlines())
         check(rc == 0 and kv.get("user_id") == "uid-tommy" and len(kv.get("token", "")) == 32, "login prints token", out)
         rc, out, err = rcli("-s", m.url, "-i", kv["user_id"], "-t", kv["token"], "rooms")
-        check(rc == 0 and len(out.strip().splitlines()) == 4, "token login", out + err)
+        check(rc == 0 and len(out.strip().splitlines()) == 5, "token login", out + err)
         rc, out, err = rcli("-s", m.url, "-i", kv["user_id"], "-t", "bad", "rooms")
         check(rc == 2 and "no longer valid" in err, "bad token -> auth error", err)
 
@@ -186,7 +188,7 @@ def test_totp():
         rc, out, err = rcli(*login_args(m, "secure"), "-c", "000000", "rooms")
         check(rc == 1 and "not accepted" in err, "2FA wrong code", err)
         rc, out, err = rcli(*login_args(m, "secure"), "-c", "123456", "rooms")
-        check(rc == 0 and len(out.strip().splitlines()) == 4, "2FA correct code", out + err)
+        check(rc == 0 and len(out.strip().splitlines()) == 5, "2FA correct code", out + err)
     finally:
         m.stop()
 
@@ -195,7 +197,7 @@ def test_flaky_and_chunked():
     m = Mock("--close-every", "2", "--chunked", "--ascii-json")
     try:
         rc, out, err = rcli(*login_args(m), "history", "general", "40")
-        check(rc == 0 and len(entries(out)) == 36, "chunked + escaped JSON + dropped connections", out + err)
+        check(rc == 0 and len(entries(out)) == 37, "chunked + escaped JSON + dropped connections", out + err)
         check("Hej p\u00c3\u00a5 dig" in out, "\\u escapes decoded", out)
         rc, out, err = rcli(*login_args(m), "send", "general", "after reconnect")
         check(rc == 0, "send over flaky server", err)
@@ -209,7 +211,7 @@ def test_prefix_and_errors():
     m = Mock("--prefix", "/chat")
     try:
         rc, out, err = rcli("-s", m.url + "/chat/", "-u", "tommy", "-p", "secret", "rooms")
-        check(rc == 0 and len(out.strip().splitlines()) == 4, "server under a path prefix", out + err)
+        check(rc == 0 and len(out.strip().splitlines()) == 5, "server under a path prefix", out + err)
         rc, out, err = rcli("-s", m.url, "-u", "tommy", "-p", "secret", "rooms")
         check(rc != 0 and "not JSON" in err, "non-Rocket.Chat page detected", err)
     finally:
@@ -232,7 +234,7 @@ def test_tls():
         rc, out, err = rcli(*login_args(m), "rooms")
         check(rc == 1 and "Certificate" in err, "self-signed cert rejected by default", err)
         rc, out, err = rcli("-k", *login_args(m), "rooms")
-        check(rc == 0 and len(out.strip().splitlines()) == 4, "TLS with -k", out + err)
+        check(rc == 0 and len(out.strip().splitlines()) == 5, "TLS with -k", out + err)
         rc, out, err = rcli(*login_args(m), "rooms", env={"AMIROCKET_CA_FILE": cert})
         check(rc == 0, "TLS verified against CA file", out + err)
         bad = "https://127.0.0.1:%d" % m.port

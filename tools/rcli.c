@@ -10,6 +10,7 @@
  */
 #include "../src/core/session.h"
 #include "../src/core/charset.h"
+#include "../src/core/mdtext.h"
 #include "../src/core/mem.h"
 #include "../src/posix/net_posix.h"
 
@@ -31,7 +32,7 @@ static void usage(void)
         "  -c CODE     two-factor code\n"
         "  -i ID -t T  user id and token / personal access token (or RC_USER_ID, RC_TOKEN)\n"
         "  -k          do not verify the TLS certificate\n"
-        "  -L          print text converted to ISO-8859-1 like the Amiga client\n"
+        "  -L          print text as the Amiga client shows it (markup removed, ISO-8859-1)\n"
         "commands:\n"
         "  info                     server version (no login)\n"
         "  login                    log in and print user id and token\n"
@@ -43,11 +44,14 @@ static void usage(void)
 
 static void put_text(const char *utf8)
 {
-    if (g_latin1) {
-        Buf b;
+    if (g_latin1) {   /* exactly what the Amiga GUI shows */
+        Buf b, md;
         buf_init(&b);
-        utf8_to_latin1(&b, utf8, 1);
+        buf_init(&md);
+        md_to_plain(&md, utf8);
+        utf8_to_latin1(&b, buf_str(&md), 1);
         fputs(buf_str(&b), stdout);
+        buf_free(&md);
         buf_free(&b);
     } else {
         fputs(utf8, stdout);
@@ -76,8 +80,8 @@ static void print_msg(const RcMsg *m)
 
 static void print_room(const RcRoom *r)
 {
-    printf("%c %-24s %-20s unread=%d%s rid=%s\n", r->type, r->name, r->fname ? r->fname : "",
-           r->unread, r->alert ? " alert" : "", r->rid);
+    printf("%c %-24s %-20s unread=%d%s%s rid=%s\n", r->type, r->name, r->fname ? r->fname : "",
+           r->unread, r->alert ? " alert" : "", r->favorite ? " fav" : "", r->rid);
 }
 
 static int fail(RcSession *s, int rc)

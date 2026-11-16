@@ -7,6 +7,7 @@ OUT="$ROOT/build/release"
 rm -rf "$OUT/AmiRocket"
 mkdir -p "$OUT/AmiRocket"
 cp "$ROOT/build/amiga/AmiRocket" "$OUT/AmiRocket/"
+cp "$ROOT/assets/icon/AmiRocket.info" "$OUT/AmiRocket/AmiRocket.info"
 cp "$ROOT/docs/AmiRocket.readme" "$OUT/AmiRocket/ReadMe"
 LHA=$(command -v lha || true)
 [ -z "$LHA" ] && [ -x "$HOME/Development/tools/amiga/m68k-amigaos-gcc-16.2/bin/lha" ] && LHA="$HOME/Development/tools/amiga/m68k-amigaos-gcc-16.2/bin/lha"

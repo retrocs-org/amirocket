@@ -4,3 +4,4 @@ qa-results/
 *.lha
 .DS_Store
 __pycache__/
+.incoming/

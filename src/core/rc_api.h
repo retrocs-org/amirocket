@@ -44,6 +44,7 @@ typedef struct {
     int   unread;
     int   alert;
     int   open;
+    int   favorite;    /* starred by the user ("f") */
     ar_ms updated_ms;
 } RcRoom;
 
@@ -123,7 +124,8 @@ void rc_msglist_free(RcMsgList *l);
 int rc_msglist_merge(RcMsgList *dst, RcMsgList *src, int max_keep);
 /* Same for rooms (upsert by rid, apply removed). */
 int rc_roomlist_merge(RcRoomList *dst, RcRoomList *src);
-void rc_roomlist_sort(RcRoomList *l);
+void rc_roomlist_sort(RcRoomList *l);   /* channels/groups, then DMs; by name */
+int  rc_room_compare(const RcRoom *a, const RcRoom *b);  /* by name, ignoring leading punctuation */
 /* Deep copy (items and removed ids). Returns 0, or -1 when out of memory. */
 int rc_roomlist_copy(RcRoomList *dst, const RcRoomList *src);
 

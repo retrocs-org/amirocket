@@ -7,6 +7,7 @@
 #include "../src/core/buf.h"
 #include "../src/core/charset.h"
 #include "../src/core/json.h"
+#include "../src/core/mdtext.h"
 #include "../src/core/mem.h"
 #include "../src/core/rc_api.h"
 #include "../src/core/timeutil.h"
@@ -235,6 +236,44 @@ static void test_merge(void)
     CHECK_STR(rc_system_text("something-new"), "(system event)");
 }
 
+static void md_case(const char *in, const char *want, int line)
+{
+    Buf b;
+    buf_init(&b);
+    md_to_plain(&b, in);
+    report(strcmp(buf_str(&b), want) == 0, in, __FILE__, line);
+    if (strcmp(buf_str(&b), want) != 0) {
+        g_log("     got: ");
+        g_log(buf_str(&b));
+        g_log("\n");
+    }
+    buf_free(&b);
+}
+#define MD(in, want) md_case(in, want, __LINE__)
+
+static void test_markdown(void)
+{
+    MD("plain text", "plain text");
+    MD("*bold* _italic_ ~strike~", "bold italic strike");
+    MD("**strong** __under__ ~~gone~~", "strong under gone");
+    MD("a *nested _mix_* end", "a nested mix end");
+    MD("2*3*4 and snake_case_name and a * b * c", "2*3*4 and snake_case_name and a * b * c");
+    MD("x * not bold* y", "x * not bold* y");
+    MD("`*keep* me` done", "*keep* me done");
+    MD("see [the docs](https://example.com/a_b_c)", "see the docs (https://example.com/a_b_c)");
+    MD("[https://x.org](https://x.org)", "https://x.org");
+    MD("https://example.com/some_path_with_underscores_ ok", "https://example.com/some_path_with_underscores_ ok");
+    MD("hi :smile: :thumbsup: :unknown_code: a:b:c", "hi :) (y) :unknown_code: a:b:c");
+    MD("# Title\n## Sub", "Title\nSub");
+    MD("before\n```yaml\nkey: *value*\n  - _x_\n```\nafter *b*", "before\nkey: *value*\n  - _x_\nafter b");
+    MD("```one line```", "one line");
+    MD("line1\n\nline3", "line1\n\nline3");
+    MD("", "");
+    MD("unclosed `tick and *star", "unclosed `tick and *star");
+    MD("\xC3\xA5*\xC3\xA4*", "\xC3\xA5*\xC3\xA4*");      /* no emphasis inside a word */
+    MD("*\xC3\xA5ngest*", "\xC3\xA5ngest");
+}
+
 int run_core_tests(void (*log)(const char *))
 {
     char b[96];
@@ -247,6 +286,7 @@ int run_core_tests(void (*log)(const char *))
     test_charset();
     test_time();
     test_merge();
+    test_markdown();
     snprintf(b, sizeof(b), "core tests: %d passed, %d failed\n", g_pass, g_fail);
     log(b);
     return g_fail;

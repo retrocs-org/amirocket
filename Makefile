@@ -37,12 +37,19 @@ HOST_CORE := $(CORE_SRC) src/posix/mem_posix.c src/posix/net_posix.c
 
 AMIGA_OBJ := $(patsubst %.c,build/amiga/obj/%.o,$(AMIGA_SRC))
 
-.PHONY: all amiga host test clean release install-builds qa-selftest qa-probe
+.PHONY: all amiga host test clean release install-builds qa-selftest qa-probe icon
 
 all: amiga
 
 amiga: build/amiga/AmiRocket
-	@if [ -d "$(dir $(BUILDS_DIR))" ]; then mkdir -p "$(BUILDS_DIR)" && cp build/amiga/AmiRocket "$(BUILDS_DIR)/" && echo "-> $(BUILDS_DIR)/AmiRocket"; fi
+	cp assets/icon/AmiRocket.info build/amiga/AmiRocket.info
+	@if [ -d "$(dir $(BUILDS_DIR))" ]; then mkdir -p "$(BUILDS_DIR)" && cp build/amiga/AmiRocket build/amiga/AmiRocket.info "$(BUILDS_DIR)/" && echo "-> $(BUILDS_DIR)/AmiRocket (+ icon)"; fi
+
+# Regenerates the Workbench icon from tools/icon (needs Pillow); the result
+# is committed, so normal builds do not need Python.
+icon:
+	python3 tools/icon/draw_icon.py assets/icon
+	python3 tools/icon/make_info.py assets/icon/normal.png assets/icon/selected.png assets/icon/AmiRocket.info
 
 build/amiga/AmiRocket: $(AMIGA_OBJ)
 	@mkdir -p $(dir $@)

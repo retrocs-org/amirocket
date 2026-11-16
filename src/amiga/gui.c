@@ -15,6 +15,7 @@
 #include "prefs.h"
 #include "worker.h"
 #include "../core/charset.h"
+#include "../core/mdtext.h"
 #include "../core/mem.h"
 #include "../core/timeutil.h"
 #include "../core/url.h"
@@ -55,6 +56,7 @@
 #include <clib/alib_protos.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 struct IntuitionBase *IntuitionBase;
@@ -69,7 +71,7 @@ struct Library *ListBrowserBase, *CheckBoxBase, *LabelBase;
 #define INPUT_MAX    4000
 
 enum {
-    G_ROOMS = 1, G_MSGS, G_INPUT, G_SEND, G_STATUS,
+    G_ROOMS = 1, G_MSGS, G_INPUT, G_SEND, G_STATUS, G_ROOMHDR,
     L_SERVER, L_USER, L_PASS, L_CODE, L_VERIFY, L_REMEMBER, L_CONNECT, L_CANCEL,
     G_COUNT
 };
@@ -90,18 +92,16 @@ static struct NewMenu g_newmenu[] = {
     { NM_END, NULL, NULL, 0, 0, NULL }
 };
 
-static struct ColumnInfo g_msg_cols[] = {
-    { 9,  (STRPTR)"", 0 },
-    { 16, (STRPTR)"", 0 },
-    { 75, (STRPTR)"", 0 },
-    { -1, NULL, 0 }
-};
+enum { SEC_FAV, SEC_CHAN, SEC_DM, SEC_N };
+static const char *g_sec_names[SEC_N] = { "Favorites", "Channels", "Direct messages" };
+
+#define GROUP_GAP_MS (5LL * 60000LL)   /* same sender within 5 min: one group */
 
 typedef struct {
     struct Screen *scr;
     APTR vi;
     struct Menu *menu;
-    UWORD hipen;
+    UWORD hipen, fillpen;
     struct MsgPort *port;      /* worker replies and events */
 
     Object *win_obj, *g[G_COUNT];
@@ -125,6 +125,8 @@ typedef struct {
 
     char status[256];
     char title[160];
+    char roomhdr[200];
+    int  collapsed[SEC_N];
     char about[512];
 } Gui;
 
@@ -194,6 +196,40 @@ static const RcRoom *find_room(const char *rid)
     return NULL;
 }
 
+/* "# general", "* priv-board", "@ thebiga", "@ Styrbjorn (you)",
+ * "@ RetroFritzl +2" for a group DM. */
+static void room_label(Buf *b, const RcRoom *r, int counts)
+{
+    buf_puts(b, r->type == 'd' ? "@ " : r->type == 'p' ? "* " : "# ");
+    if (r->type == 'd') {
+        const char *comma = strchr(r->name, ',');
+        if (comma) {
+            Buf first;
+            const char *p;
+            int others = 0;
+            buf_init(&first);
+            buf_append(&first, r->name, (size_t)(comma - r->name));
+            for (p = comma; p; p = strchr(p + 1, ','))
+                others++;
+            to_latin1(b, ar_trim(first.data ? first.data : (char *)""), 0);
+            buf_printf(b, " +%d", others);
+            buf_free(&first);
+        } else {
+            to_latin1(b, r->name, 0);
+            if (G.username[0] && !ar_strcasecmp(r->name, G.username))
+                buf_puts(b, " (you)");
+        }
+    } else {
+        to_latin1(b, rc_room_title(r), 0);
+    }
+    if (counts) {
+        if (r->unread > 0)
+            buf_printf(b, "  (%d)", r->unread);
+        else if (r->alert)
+            buf_puts(b, "  (!)");
+    }
+}
+
 static void update_title(void)
 {
     const RcRoom *r = G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
@@ -203,13 +239,36 @@ static void update_title(void)
     buf_puts(&b, "AmiRocket");
     if (r) {
         buf_puts(&b, " - ");
-        buf_putc(&b, r->type == 'd' ? '@' : '#');
-        to_latin1(&b, r->type == 'd' ? r->name : rc_room_title(r), 0);
+        room_label(&b, r, 0);
     }
     ar_strlcpy(G.title, buf_str(&b), sizeof(G.title));
+    buf_clear(&b);
+    if (r) {
+        room_label(&b, r, 0);
+        if (r->type == 'd' && r->fname && *r->fname && strcmp(r->fname, r->name) && !strchr(r->name, ',')) {
+            buf_puts(&b, "   ");
+            to_latin1(&b, r->fname, 0);
+        } else if (r->type == 'd' && strchr(r->name, ',')) {
+            buf_puts(&b, "   ");
+            to_latin1(&b, r->name, 0);
+        }
+    } else {
+        buf_puts(&b, G.connected ? "Select a room" : "Not connected");
+    }
+    ar_strlcpy(G.roomhdr, buf_str(&b), sizeof(G.roomhdr));
     buf_free(&b);
-    if (G.win)
+    if (G.win) {
         SetWindowTitles(G.win, (STRPTR)G.title, (STRPTR)~0);
+        SetGadgetAttrs((struct Gadget *)G.g[G_ROOMHDR], G.win, NULL, GA_Text, (ULONG)G.roomhdr, TAG_END);
+    }
+}
+
+/* Local wall-clock time from the Amiga clock (local since 1978). */
+static ar_ms amiga_local_ms(void)
+{
+    struct DateStamp ds;
+    DateStamp(&ds);
+    return ((ar_ms)(2922 + ds.ds_Days) * 86400000LL) + (ar_ms)ds.ds_Minute * 60000LL + (ar_ms)ds.ds_Tick * 20LL;
 }
 
 /* Amiga clock is local time since 1978-01-01; derive the offset to UTC
@@ -246,56 +305,98 @@ static void free_list(struct List *l)
         FreeListBrowserNode(n);
 }
 
+static int room_section(const RcRoom *r)
+{
+    if (r->favorite)
+        return SEC_FAV;
+    return r->type == 'd' ? SEC_DM : SEC_CHAN;
+}
+
+static const RcRoomList *g_sort_rooms;
+
+static int cmp_room_idx(const void *a, const void *b)
+{
+    return rc_room_compare(&g_sort_rooms->items[*(const int *)a], &g_sort_rooms->items[*(const int *)b]);
+}
+
+/* Sidebar like the Rocket.Chat desktop client: collapsible Favorites,
+ * Channels and Direct messages sections, each sorted by name. */
 static void rooms_rebuild(void)
 {
-    int i, sel = -1;
+    struct Node *n, *sel = NULL;
+    int *order, i, s;
     Buf b;
 
     if (G.win)
         SetGadgetAttrs((struct Gadget *)G.g[G_ROOMS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
+    /* keep the user's collapsed/expanded choice across rebuilds */
+    for (n = G.room_list.lh_Head; n->ln_Succ; n = n->ln_Succ) {
+        ULONG gen = 0, flags = 0, ud = 0;
+        GetListBrowserNodeAttrs(n, LBNA_Generation, (ULONG)&gen, LBNA_Flags, (ULONG)&flags,
+                                LBNA_UserData, (ULONG)&ud, TAG_END);
+        if (gen == 1 && ud >= 1 && ud <= SEC_N)
+            G.collapsed[ud - 1] = !(flags & LBFLG_SHOWCHILDREN);
+    }
     free_list(&G.room_list);
+
+    order = (int *)ar_malloc(sizeof(int) * (size_t)(G.rooms.count + 1));
     buf_init(&b);
-    for (i = 0; i < G.rooms.count; i++) {
-        const RcRoom *r = &G.rooms.items[i];
-        struct Node *n;
-        buf_clear(&b);
-        buf_puts(&b, r->type == 'd' ? "@ " : r->type == 'p' ? "* " : "# ");
-        to_latin1(&b, r->type == 'd' ? r->name : rc_room_title(r), 0);
-        if (r->unread > 0)
-            buf_printf(&b, " (%d)", r->unread);
-        else if (r->alert)
-            buf_puts(&b, " (!)");
+    for (s = 0; order && s < SEC_N; s++) {
+        int cnt = 0;
+        for (i = 0; i < G.rooms.count; i++)
+            if (room_section(&G.rooms.items[i]) == s)
+                order[cnt++] = i;
+        if (!cnt)
+            continue;
+        g_sort_rooms = &G.rooms;
+        qsort(order, (size_t)cnt, sizeof(int), cmp_room_idx);
         n = AllocListBrowserNode(1,
-                                 LBNA_UserData, (ULONG)r->rid,
+                                 LBNA_Generation, 1,
+                                 LBNA_Flags, LBFLG_HASCHILDREN | (G.collapsed[s] ? 0 : LBFLG_SHOWCHILDREN),
+                                 LBNA_UserData, (ULONG)(s + 1),
                                  LBNA_Column, 0,
                                  LBNCA_CopyText, TRUE,
-                                 LBNCA_Text, (ULONG)buf_str(&b),
-                                 (r->unread || r->alert) ? LBNCA_FGPen : TAG_IGNORE, (ULONG)G.hipen,
+                                 LBNCA_Text, (ULONG)g_sec_names[s],
                                  TAG_END);
         if (n)
             AddTail(&G.room_list, n);
-        if (!strcmp(r->rid, G.cur_rid))
-            sel = i;
+        for (i = 0; i < cnt; i++) {
+            const RcRoom *r = &G.rooms.items[order[i]];
+            buf_clear(&b);
+            room_label(&b, r, 1);
+            n = AllocListBrowserNode(1,
+                                     LBNA_Generation, 2,
+                                     LBNA_Flags, G.collapsed[s] ? LBFLG_HIDDEN : 0,
+                                     LBNA_UserData, (ULONG)r->rid,
+                                     LBNA_Column, 0,
+                                     LBNCA_CopyText, TRUE,
+                                     LBNCA_Text, (ULONG)buf_str(&b),
+                                     (r->unread || r->alert) ? LBNCA_FGPen : TAG_IGNORE, (ULONG)G.hipen,
+                                     TAG_END);
+            if (n) {
+                AddTail(&G.room_list, n);
+                if (!strcmp(r->rid, G.cur_rid))
+                    sel = n;
+            }
+        }
     }
     buf_free(&b);
+    ar_free(order);
     if (G.win)
         SetGadgetAttrs((struct Gadget *)G.g[G_ROOMS], G.win, NULL,
                        LISTBROWSER_Labels, (ULONG)&G.room_list,
-                       LISTBROWSER_Selected, (ULONG)sel, TAG_END);
+                       sel ? LISTBROWSER_SelectedNode : LISTBROWSER_Selected, sel ? (ULONG)sel : (ULONG)-1,
+                       TAG_END);
 }
 
-static int add_row(const char *time, const char *nick, const char *text, int highlight)
+static int add_row(const char *text, int pen)
 {
-    struct Node *n = AllocListBrowserNode(3,
+    struct Node *n = AllocListBrowserNode(1,
         LBNA_Column, 0,
-            LBNCA_CopyText, TRUE, LBNCA_Text, (ULONG)time,
-        LBNA_Column, 1,
-            LBNCA_CopyText, TRUE, LBNCA_Text, (ULONG)nick,
-            highlight & 2 ? LBNCA_FGPen : TAG_IGNORE, (ULONG)G.hipen,
-        LBNA_Column, 2,
-            LBNCA_CopyText, TRUE, LBNCA_Text, (ULONG)text,
+            LBNCA_CopyText, TRUE,
+            LBNCA_Text, (ULONG)text,
             LBNCA_WordWrap, TRUE,
-            highlight & 1 ? LBNCA_FGPen : TAG_IGNORE, (ULONG)G.hipen,
+            pen >= 0 ? LBNCA_FGPen : TAG_IGNORE, (ULONG)pen,
         TAG_END);
     if (!n)
         return 0;
@@ -314,47 +415,84 @@ static int mentions_me(const char *utf8)
     snprintf(tag, sizeof(tag), "@%s", G.username);
     n = strlen(tag);
     for (p = utf8; (p = strchr(p, '@')) != NULL; p++) {
-        if (!ar_strncasecmp(p, tag, n) || !strncmp(p, "@all", 4) || !strncmp(p, "@here", 5)) {
-            char c = p[ !ar_strncasecmp(p, tag, n) ? n : (p[1] == 'a' ? 4 : 5) ];
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+        size_t l = 0;
+        if (!ar_strncasecmp(p, tag, n))
+            l = n;
+        else if (!strncmp(p, "@all", 4))
+            l = 4;
+        else if (!strncmp(p, "@here", 5))
+            l = 5;
+        if (l) {
+            char c = p[l];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                  c == '.' || c == '_' || c == '-'))
                 return 1;
         }
     }
     return 0;
 }
 
+static void day_label(char *out, size_t sz, ar_ms local, long today)
+{
+    static const char *wd[] = { "Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday" };
+    static const char *mo[] = { "January", "February", "March", "April", "May", "June", "July",
+                                "August", "September", "October", "November", "December" };
+    long day = ms_day_number(local), y;
+    unsigned m, d;
+
+    if (day == today) {
+        snprintf(out, sz, "------------  Today  ------------");
+        return;
+    }
+    if (day == today - 1) {
+        snprintf(out, sz, "------------  Yesterday  ------------");
+        return;
+    }
+    civil_from_days(day, &y, &m, &d);
+    snprintf(out, sz, "------------  %s %u %s %ld  ------------",
+             wd[((day % 7) + 7) % 7], d, mo[m - 1], y);
+}
+
+/* Message view laid out like the Rocket.Chat client: a "name  time" header
+ * for each run of messages from the same sender, the messages indented
+ * below it, and a separator for each day. */
 static void msgs_rebuild(int scroll_bottom)
 {
-    long lastday = -1;
+    long lastday = -1, today = ms_day_number(amiga_local_ms());
+    const char *prev_user = NULL;
+    ar_ms prev_ts = 0;
     int i, rows = 0;
-    Buf text, nick;
+    Buf text, md, line;
 
     if (G.win)
         SetGadgetAttrs((struct Gadget *)G.g[G_MSGS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
     free_list(&G.msg_list);
     buf_init(&text);
-    buf_init(&nick);
+    buf_init(&md);
+    buf_init(&line);
     for (i = 0; i < G.msgs.count; i++) {
         const RcMsg *m = &G.msgs.items[i];
         ar_ms local = m->ts_ms + G.tz_ms;
         long day = ms_day_number(local);
         const char *sys = rc_system_text(m->type);
         char hm[8];
-        int hl = 0;
-        char *line, *nl;
+        char *p, *nl;
+        int pen = -1;
 
         if (day != lastday) {
-            char date[16], sep[40];
-            ms_format_date(local, date);
-            snprintf(sep, sizeof(sep), "------ %s ------", date);
-            rows += add_row("", "", sep, 0);
+            char sep[80];
+            if (rows)
+                rows += add_row("", -1);
+            day_label(sep, sizeof(sep), local, today);
+            rows += add_row(sep, -1);
             lastday = day;
+            prev_user = NULL;
         }
         ms_format_hm(local, hm);
-        buf_clear(&text);
-        buf_clear(&nick);
+
         if (sys) {
-            buf_puts(&nick, "*");
+            buf_clear(&text);
+            buf_puts(&text, "  * ");
             to_latin1(&text, m->username, 0);
             buf_putc(&text, ' ');
             buf_puts(&text, sys);
@@ -362,37 +500,64 @@ static void msgs_rebuild(int scroll_bottom)
                 buf_putc(&text, ' ');
                 to_latin1(&text, m->text, 0);
             }
-        } else {
-            to_latin1(&nick, m->username, 0);
-            if (m->tmid)
-                buf_puts(&text, "[thread] ");
-            to_latin1(&text, m->text, 1);
-            if (m->n_attachments) {
-                if (m->text && *m->text)
-                    buf_putc(&text, ' ');
-                buf_puts(&text, "[file: ");
-                to_latin1(&text, m->attachment ? m->attachment : "attachment", 0);
-                buf_putc(&text, ']');
-            }
-            if (m->edited)
-                buf_puts(&text, " (edited)");
-            if (mentions_me(m->text))
-                hl |= 1;
-            if (G.username[0] && !strcmp(m->username, G.username))
-                hl |= 2;
+            buf_printf(&text, "   %s", hm);
+            rows += add_row(buf_str(&text), -1);
+            prev_user = NULL;
+            continue;
         }
-        /* one listbrowser row per text line */
-        line = text.data ? text.data : (char *)"";
-        do {
-            nl = strchr(line, '\n');
+
+        if (!prev_user || strcmp(prev_user, m->username) != 0 || m->ts_ms - prev_ts > GROUP_GAP_MS || m->tmid) {
+            if (rows)
+                rows += add_row("", -1);
+            buf_clear(&text);
+            to_latin1(&text, m->username, 0);
+            if (m->name && *m->name && ar_strcasecmp(m->name, m->username)) {
+                buf_puts(&text, "  (");
+                to_latin1(&text, m->name, 0);
+                buf_putc(&text, ')');
+            }
+            buf_printf(&text, "   %s", hm);
+            if (m->tmid)
+                buf_puts(&text, "   [reply in thread]");
+            rows += add_row(buf_str(&text), G.fillpen);
+        }
+        prev_user = m->username;
+        prev_ts = m->ts_ms;
+
+        buf_clear(&md);
+        md_to_plain(&md, m->text);
+        buf_clear(&text);
+        to_latin1(&text, buf_str(&md), 1);
+        if (m->n_attachments) {
+            if (text.len)
+                buf_putc(&text, '\n');
+            buf_puts(&text, "[file: ");
+            to_latin1(&text, m->attachment ? m->attachment : "attachment", 0);
+            buf_putc(&text, ']');
+        }
+        if (m->edited)
+            buf_puts(&text, "  (edited)");
+        if (mentions_me(m->text))
+            pen = G.hipen;
+
+        /* one row per line, indented under the sender like the original */
+        p = text.data ? text.data : (char *)"";
+        for (;;) {
+            nl = strchr(p, '\n');
             if (nl)
                 *nl = 0;
-            rows += add_row(line == text.data ? hm : "", line == text.data ? buf_str(&nick) : "", line, hl);
-            line = nl ? nl + 1 : NULL;
-        } while (line);
+            buf_clear(&line);
+            buf_puts(&line, "    ");
+            buf_puts(&line, p);
+            rows += add_row(buf_str(&line), pen);
+            if (!nl)
+                break;
+            p = nl + 1;
+        }
     }
     buf_free(&text);
-    buf_free(&nick);
+    buf_free(&md);
+    buf_free(&line);
     if (G.win) {
         SetGadgetAttrs((struct Gadget *)G.g[G_MSGS], G.win, NULL,
                        LISTBROWSER_Labels, (ULONG)&G.msg_list,
@@ -829,10 +994,16 @@ static void on_room_clicked(void)
     struct Node *n = NULL;
     char *rid = NULL;
 
+    ULONG gen = 0;
+
     GetAttr(LISTBROWSER_SelectedNode, G.g[G_ROOMS], (ULONG *)&n);
     if (!n)
         return;
-    GetListBrowserNodeAttrs(n, LBNA_UserData, (ULONG)&rid, TAG_END);
+    GetListBrowserNodeAttrs(n, LBNA_Generation, (ULONG)&gen, LBNA_UserData, (ULONG)&rid, TAG_END);
+    if (gen != 2) {
+        rooms_rebuild();   /* a section header: keep the open room selected */
+        return;
+    }
     if (!rid || !strcmp(rid, G.cur_rid))
         return;
     ar_strlcpy(G.cur_rid, rid, sizeof(G.cur_rid));
@@ -996,14 +1167,18 @@ static int open_main(void)
 {
     Object *root;
     struct DrawInfo *dri;
+    ULONG minside;
 
     G.scr = LockPubScreen(NULL);
     if (!G.scr)
         return -1;
     dri = GetScreenDrawInfo(G.scr);
     G.hipen = dri ? dri->dri_Pens[HIGHLIGHTTEXTPEN] : 2;
+    G.fillpen = dri ? dri->dri_Pens[FILLPEN] : 3;
     if (dri)
         FreeScreenDrawInfo(G.scr, dri);
+    /* room list wide enough for about 22 characters of the screen font */
+    minside = (ULONG)(G.scr->RastPort.Font ? G.scr->RastPort.Font->tf_XSize : 8) * 22;
     G.vi = GetVisualInfo(G.scr, TAG_END);
     G.menu = CreateMenus(g_newmenu, GTMN_FrontPen, 0, TAG_END);
     if (G.menu && G.vi)
@@ -1017,20 +1192,26 @@ static int open_main(void)
                 GA_ID, G_ROOMS,
                 GA_RelVerify, TRUE,
                 LISTBROWSER_Labels, (ULONG)&G.room_list,
+                LISTBROWSER_Hierarchical, TRUE,
                 LISTBROWSER_ShowSelected, TRUE,
                 LISTBROWSER_AutoWheel, TRUE,
             End,
-            CHILD_WeightedWidth, 25,
-            CHILD_MinWidth, 100,
+            CHILD_WeightedWidth, 28,
+            CHILD_MinWidth, minside,
             LAYOUT_AddChild, VLayoutObject,
+                LAYOUT_AddChild, G.g[G_ROOMHDR] = ButtonObject,
+                    GA_ID, G_ROOMHDR,
+                    GA_ReadOnly, TRUE,
+                    GA_Text, (ULONG)G.roomhdr,
+                    BUTTON_Justification, BCJ_LEFT,
+                End,
+                CHILD_WeightedHeight, 0,
                 LAYOUT_AddChild, G.g[G_MSGS] = ListBrowserObject,
                     GA_ID, G_MSGS,
                     GA_ReadOnly, TRUE,
                     LISTBROWSER_Labels, (ULONG)&G.msg_list,
-                    LISTBROWSER_ColumnInfo, (ULONG)g_msg_cols,
                     LISTBROWSER_WrapText, TRUE,
                     LISTBROWSER_AutoWheel, TRUE,
-                    LISTBROWSER_VertSeparators, FALSE,
                 End,
                 LAYOUT_AddChild, HLayoutObject,
                     LAYOUT_AddChild, G.g[G_INPUT] = StringObject,
@@ -1047,7 +1228,7 @@ static int open_main(void)
                 End,
                 CHILD_WeightedHeight, 0,
             End,
-            CHILD_WeightedWidth, 75,
+            CHILD_WeightedWidth, 72,
         End,
         LAYOUT_AddChild, G.g[G_STATUS] = ButtonObject,
             GA_ID, G_STATUS,
@@ -1106,6 +1287,7 @@ int gui_run(void)
     rc_msglist_init(&G.msgs);
     ar_strlcpy(G.title, "AmiRocket", sizeof(G.title));
     ar_strlcpy(G.status, "Not connected", sizeof(G.status));
+    ar_strlcpy(G.roomhdr, "Not connected", sizeof(G.roomhdr));
 
     if (open_libs() < 0) {
         close_libs();

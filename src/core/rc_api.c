@@ -204,6 +204,7 @@ static int parse_room(const JDoc *d, int o, RcRoom *r)
     r->unread = (int)json_ll(d, json_get(d, o, "unread"), 0);
     r->alert = json_bool(d, json_get(d, o, "alert"), 0);
     r->open = json_bool(d, json_get(d, o, "open"), 1);
+    r->favorite = json_bool(d, json_get(d, o, "f"), 0);
     r->updated_ms = json_date(d, json_get(d, o, "_updatedAt"));
     if (!r->name) {
         rc_room_free(r);
@@ -833,13 +834,30 @@ static int type_rank(char t)
     }
 }
 
+/* Title for sorting: leading punctuation such as "@" or "#" is ignored, so
+ * "@Styrbjorn ..." sorts under S as in the Rocket.Chat client. */
+static const char *sort_key(const RcRoom *r)
+{
+    const char *t = r->type == 'd' ? r->name : rc_room_title(r);
+    while (*t && !((*t >= 'a' && *t <= 'z') || (*t >= 'A' && *t <= 'Z') ||
+                   (*t >= '0' && *t <= '9') || (unsigned char)*t >= 0x80))
+        t++;
+    return t;
+}
+
+int rc_room_compare(const RcRoom *x, const RcRoom *y)
+{
+    int d = ar_strcasecmp(sort_key(x), sort_key(y));
+    return d ? d : strcmp(x->rid, y->rid);
+}
+
 static int cmp_room(const void *a, const void *b)
 {
     const RcRoom *x = (const RcRoom *)a, *y = (const RcRoom *)b;
     int d = type_rank(x->type) - type_rank(y->type);
     if (d)
         return d;
-    return ar_strcasecmp(rc_room_title(x), rc_room_title(y));
+    return rc_room_compare(x, y);
 }
 
 void rc_roomlist_sort(RcRoomList *l)
