@@ -3,6 +3,8 @@
  *
  *   AmiRocket                      start the GUI (also from Workbench)
  *   AmiRocket SELFTEST             run the core unit tests, RC 0 = pass
+ *                                  (keywords may also be given quoted, e.g.
+ *                                  "SELFTEST" "PROBE=https://...")
  *   AmiRocket PROBE=<url> [USER=<u> PASSWORD=<p> [CODE=<2fa>]] [INSECURE]
  *                                  check TCP/IP, AmiSSL and the server from
  *                                  the Shell, without opening any window
@@ -12,6 +14,7 @@
 #include "../core/charset.h"
 #include "../core/mem.h"
 #include "../core/session.h"
+#include "../core/util.h"
 #include "../../tests/test_core.h"
 
 #include <exec/types.h>
@@ -165,22 +168,59 @@ int main(int argc, char **argv)
     if (argc == 0) {   /* started from Workbench */
         ret = gui_run();
     } else {
-        enum { A_SELFTEST, A_PROBE, A_USER, A_PASSWORD, A_CODE, A_INSECURE, A_N };
+        enum { A_SELFTEST, A_PROBE, A_USER, A_PASSWORD, A_CODE, A_INSECURE, A_EXTRA, A_N };
         LONG args[A_N];
         struct RDArgs *rda;
+        const char *probe_url, *user, *pass, *code;
+        int do_selftest, insecure;
 
         memset(args, 0, sizeof(args));
-        rda = ReadArgs((CONST_STRPTR)"SELFTEST/S,PROBE/K,USER/K,PASSWORD/K,CODE/K,INSECURE/S", args, NULL);
+        /* EXTRA/M: launchers often quote every argument ("SELFTEST",
+         * "PROBE=url"), and ReadArgs never treats a quoted word as a
+         * keyword. Such words land in EXTRA and are parsed below. */
+        rda = ReadArgs((CONST_STRPTR)"SELFTEST/S,PROBE/K,USER/K,PASSWORD/K,CODE/K,INSECURE/S,EXTRA/M",
+                       args, NULL);
         if (!rda) {
             PrintFault(IoErr(), (CONST_STRPTR)"AmiRocket");
             ar_mem_cleanup();
             return RETURN_FAIL;
         }
-        if (args[A_SELFTEST])
+        do_selftest = args[A_SELFTEST] != 0;
+        insecure = args[A_INSECURE] != 0;
+        probe_url = (const char *)args[A_PROBE];
+        user = (const char *)args[A_USER];
+        pass = (const char *)args[A_PASSWORD];
+        code = (const char *)args[A_CODE];
+        ret = RETURN_OK;
+        if (args[A_EXTRA]) {
+            char **x;
+            for (x = (char **)args[A_EXTRA]; *x; x++) {
+                const char *w = *x, *eq = strchr(w, '=');
+                size_t kl = eq ? (size_t)(eq - w) : strlen(w);
+                if (!eq && !ar_strcasecmp(w, "SELFTEST"))
+                    do_selftest = 1;
+                else if (!eq && !ar_strcasecmp(w, "INSECURE"))
+                    insecure = 1;
+                else if (eq && kl == 5 && !ar_strncasecmp(w, "PROBE", 5))
+                    probe_url = eq + 1;
+                else if (eq && kl == 4 && !ar_strncasecmp(w, "USER", 4))
+                    user = eq + 1;
+                else if (eq && kl == 8 && !ar_strncasecmp(w, "PASSWORD", 8))
+                    pass = eq + 1;
+                else if (eq && kl == 4 && !ar_strncasecmp(w, "CODE", 4))
+                    code = eq + 1;
+                else {
+                    outf("AmiRocket: unknown argument \"%s\"\n", w);
+                    ret = RETURN_ERROR;
+                }
+            }
+        }
+        if (ret != RETURN_OK)
+            ;
+        else if (do_selftest)
             ret = selftest();
-        else if (args[A_PROBE])
-            ret = probe((const char *)args[A_PROBE], (const char *)args[A_USER],
-                        (const char *)args[A_PASSWORD], (const char *)args[A_CODE], args[A_INSECURE] != 0);
+        else if (probe_url)
+            ret = probe(probe_url, user, pass, code, insecure);
         else
             ret = gui_run();
         FreeArgs(rda);
