@@ -1,6 +1,6 @@
 {
   "name": "AmiRocket SELFTEST (core unit tests on 68k)",
-  "application": "Builds:AmiRocket",
+  "application": "AmiRocket:AmiRocket",
   "arguments": ["SELFTEST"],
   "timeoutSeconds": 240,
   "expectedReturnCode": 0

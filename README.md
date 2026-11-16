@@ -39,13 +39,12 @@ AmiRocket PROBE=https://chat.example.com [USER=name PASSWORD=secret [CODE=123456
 Cross-compile on the Mac with the AmigaPorts toolchain in `~/Development/tools/amiga/m68k-amigaos-gcc-16.2`:
 
 ```sh
-make                    # build/amiga/AmiRocket (68020)
+make                    # build/amiga/AmiRocket (68020), copied to ~/Development/builds/AmiRocket
 make AMIGA_CPU=-m68040  # other CPU targets
-make install-builds     # copy to ~/Development/builds/AmiRocket (Builds: in the emulator)
 make release            # build/release/AmiRocket-0.1.lha
 ```
 
-Set `AMIGA_PREFIX=` if the toolchain lives somewhere else.
+Set `AMIGA_PREFIX=` if the toolchain lives somewhere else, and `BUILDS_DIR=` to copy the executable elsewhere. On the everyday emulator desktop, where `~/Development/builds` is `Builds:`, start it as `Builds:AmiRocket/AmiRocket`.
 
 ### Host tools and tests
 
@@ -72,12 +71,11 @@ build/host/rcli -L ...        # print through the Amiga ISO-8859-1 conversion
 The tests use `/Applications/Amiga Workbench.app` from AmigaMac:
 
 ```sh
-AMIGAMAC='/Applications/Amiga Workbench.app/Contents/MacOS/AmigaWorkbench'
-"$AMIGAMAC" --workbench latest --mount "Builds:$PWD/build/amiga" \
-    --test qa/selftest.json --output qa-results/selftest-$(date +%s)
-"$AMIGAMAC" --workbench latest --mount "Builds:$PWD/build/amiga" \
-    --test qa/probe-public.json --output qa-results/probe-$(date +%s)
+make qa-selftest   # core unit tests on the emulated 68k + bsdsocket/AmiSSL check
+make qa-probe      # DNS, TCP and verified TLS against open.rocket.chat
 ```
+
+Both mount only `~/Development/builds/AmiRocket`, as the volume `AmiRocket:`, because test mode copies every mounted folder. Results go to `qa-results/<test>-<timestamp>/`. The program's output is in `profile/.../AutoRun/launch.log`.
 
 The `probe-public` test needs the emulator's Roadshow network (en0 bridge) and internet access. To try the GUI against the mock server, run `python3 tests/mock_rocketchat.py --host 0.0.0.0 --port 3000` on the Mac. Then log in from the emulator to `http://<mac-lan-ip>:3000` as `tommy` / `secret` (the `secure` / `secret` user needs 2FA code `123456`).
 

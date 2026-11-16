@@ -1,12 +1,16 @@
 # AmiRocket - Rocket.Chat client for AmigaOS 3.2
 #
-#   make            Amiga executable (68020) -> build/amiga/AmiRocket
+#   make            Amiga executable (68020) -> build/amiga/AmiRocket, copied to
+#                   ~/Development/builds/AmiRocket/AmiRocket (Builds:AmiRocket/AmiRocket)
 #   make host       host tools and tests -> build/host/{rcli,test_core}
 #   make test       run host unit + integration tests (needs python3, openssl)
 #   make release    LhA archive in build/release (needs lha in PATH or toolchain)
-#   make install-builds   copy the Amiga build to ~/Development/builds/AmiRocket
+#   make qa-selftest      run SELFTEST in Amiga Workbench.app (AmigaMac)
+#   make qa-probe         network/TLS check against open.rocket.chat
 
 VERSION    := 0.1
+BUILDS_DIR ?= $(HOME)/Development/builds/AmiRocket
+AMIGAMAC   ?= /Applications/Amiga Workbench.app/Contents/MacOS/AmigaWorkbench
 AMIGA_PREFIX ?= $(HOME)/Development/tools/amiga/m68k-amigaos-gcc-16.2
 AMIGA_CC   ?= $(AMIGA_PREFIX)/bin/m68k-amigaos-gcc
 AMIGA_CPU  ?= -m68020
@@ -33,11 +37,12 @@ HOST_CORE := $(CORE_SRC) src/posix/mem_posix.c src/posix/net_posix.c
 
 AMIGA_OBJ := $(patsubst %.c,build/amiga/obj/%.o,$(AMIGA_SRC))
 
-.PHONY: all amiga host test clean release install-builds
+.PHONY: all amiga host test clean release install-builds qa-selftest qa-probe
 
 all: amiga
 
 amiga: build/amiga/AmiRocket
+	@if [ -d "$(dir $(BUILDS_DIR))" ]; then mkdir -p "$(BUILDS_DIR)" && cp build/amiga/AmiRocket "$(BUILDS_DIR)/" && echo "-> $(BUILDS_DIR)/AmiRocket"; fi
 
 build/amiga/AmiRocket: $(AMIGA_OBJ)
 	@mkdir -p $(dir $@)
@@ -66,8 +71,16 @@ release: amiga
 	sh tools/make-release.sh $(VERSION)
 
 install-builds: amiga
-	mkdir -p $(HOME)/Development/builds/AmiRocket
-	cp build/amiga/AmiRocket $(HOME)/Development/builds/AmiRocket/
+
+# Only the AmiRocket folder is mounted (as AmiRocket:): test mode copies
+# every mounted folder, and all of ~/Development/builds is large.
+QA_RUN = "$(AMIGAMAC)" --workbench latest --mount "AmiRocket:$(BUILDS_DIR)"
+
+qa-selftest: amiga
+	$(QA_RUN) --test qa/selftest.json --output qa-results/selftest-$$(date +%Y%m%d-%H%M%S)
+
+qa-probe: amiga
+	$(QA_RUN) --test qa/probe-public.json --output qa-results/probe-$$(date +%Y%m%d-%H%M%S)
 
 clean:
 	rm -rf build
