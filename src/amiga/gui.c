@@ -14,6 +14,7 @@
 #include "gui.h"
 #include "prefs.h"
 #include "theme.h"
+#include "view.h"
 #include "worker.h"
 #include "../core/charset.h"
 #include "../core/mdtext.h"
@@ -28,6 +29,8 @@
 #include <intuition/gadgetclass.h>
 #include <intuition/icclass.h>
 #include <libraries/gadtools.h>
+#include <utility/hooks.h>
+#include <graphics/regions.h>
 #include <graphics/gfxbase.h>
 #include <graphics/gfx.h>
 #include <libraries/locale.h>
@@ -37,6 +40,8 @@
 #include <gadgets/button.h>
 #include <gadgets/string.h>
 #include <gadgets/listbrowser.h>
+#include <gadgets/space.h>
+#include <gadgets/scroller.h>
 #include <gadgets/checkbox.h>
 #include <images/label.h>
 #include <reaction/reaction_macros.h>
@@ -53,6 +58,8 @@
 #include <proto/button.h>
 #include <proto/string.h>
 #include <proto/listbrowser.h>
+#include <proto/space.h>
+#include <proto/scroller.h>
 #include <proto/checkbox.h>
 #include <proto/label.h>
 #include <clib/alib_protos.h>
@@ -67,18 +74,19 @@ struct Library *GadToolsBase;
 struct Library *UtilityBase;
 struct LocaleBase *LocaleBase;
 struct Library *WindowBase, *LayoutBase, *ButtonBase, *StringBase;
-struct Library *ListBrowserBase, *CheckBoxBase, *LabelBase;
+struct Library *ListBrowserBase, *CheckBoxBase, *LabelBase, *SpaceBase, *ScrollerBase;
 
 #define MAX_MESSAGES 300
 #define INPUT_MAX    4000
+#define MAX_SUGG     8
 
 enum {
-    G_ROOMS = 1, G_MSGS, G_INPUT, G_SEND, G_STATUS, G_ROOMHDR,
+    G_ROOMS = 1, G_MSGS, G_INPUT, G_SEND, G_STATUS, G_ROOMHDR, G_SIDESCROLL, G_CHATSCROLL,
     L_SERVER, L_USER, L_PASS, L_CODE, L_VERIFY, L_REMEMBER, L_CONNECT, L_CANCEL,
     G_COUNT
 };
 
-enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH, M_THEME_BASE = 100 };
+enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH, M_OWNSCREEN, M_THEME_BASE = 100 };
 
 static struct NewMenu g_newmenu[] = {
     { NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL },
@@ -92,6 +100,7 @@ static struct NewMenu g_newmenu[] = {
     { NM_TITLE, (STRPTR)"Room", NULL, 0, 0, NULL },
     { NM_ITEM, (STRPTR)"Check for new messages", (STRPTR)"R", 0, 0, (APTR)M_REFRESH },
     { NM_TITLE, (STRPTR)"Settings", NULL, 0, 0, NULL },
+    { NM_ITEM, (STRPTR)"Theme on its own screen", NULL, CHECKIT | MENUTOGGLE, 0, (APTR)M_OWNSCREEN },
     { NM_ITEM, (STRPTR)"Theme", NULL, 0, 0, NULL },
     /* theme sub-items are appended at run time */
     { NM_END, NULL, NULL, 0, 0, NULL }
@@ -101,7 +110,7 @@ static struct NewMenu g_newmenu[] = {
 enum { SEC_FAV, SEC_CHAN, SEC_DM, SEC_N };
 static const char *g_sec_names[SEC_N] = { "Favorites", "Channels", "Direct messages" };
 
-#define GROUP_GAP_MS (5LL * 60000LL)   /* same sender within 5 min: one group */
+enum { DIRTY_SIDE = 1, DIRTY_CHAT = 2, DIRTY_HEADER = 4 };
 
 typedef struct {
     struct Screen *scr;
@@ -118,7 +127,22 @@ typedef struct {
     Object *lwin_obj, *lroot;
     struct Window *lwin;
 
-    struct List room_list, msg_list;
+    struct List room_list, msg_list;   /* unused, kept for the cleanup path */
+
+    SideView side;
+    ChatView chat;
+    ViewPens pens;
+    LONG     obtained[TC_COUNT + 8];
+    int      n_obtained;
+    struct Hook render_hook, idcmp_hook;
+    BYTE     dirty_sig;
+    ULONG    dirty;            /* DIRTY_* bits */
+    int      chat_relayout;
+    char     topic[256];       /* UTF-8 */
+    char    *members;          /* open room: "username\tname\tstatus\n" lines (UTF-8) */
+    struct { char user[96]; char name[96]; int online; int recent; } sugg[MAX_SUGG];
+    int      n_sugg;
+    int      sugg_at, sugg_end;  /* '@' position and cursor in the input text */
 
     Prefs prefs;
     RcRoomList rooms;
@@ -239,6 +263,8 @@ static void room_label(Buf *b, const RcRoom *r, int counts)
     }
 }
 
+static void mark_dirty(ULONG what);
+
 static void update_title(void)
 {
     const RcRoom *r = G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
@@ -266,10 +292,9 @@ static void update_title(void)
     }
     ar_strlcpy(G.roomhdr, buf_str(&b), sizeof(G.roomhdr));
     buf_free(&b);
-    if (G.win) {
+    if (G.win)
         SetWindowTitles(G.win, (STRPTR)G.title, (STRPTR)~0);
-        SetGadgetAttrs((struct Gadget *)G.g[G_ROOMHDR], G.win, NULL, GA_Text, (ULONG)G.roomhdr, TAG_END);
-    }
+    mark_dirty(DIRTY_HEADER);
 }
 
 /* Local wall-clock time from the Amiga clock (local since 1978). */
@@ -305,7 +330,9 @@ static void update_tz(ar_ms server_now)
     G.tz_known = 1;
 }
 
-/* ---- lists --------------------------------------------------------- */
+static void cmd_open_room(const char *rid);
+
+/* ---- views --------------------------------------------------------- */
 
 static void free_list(struct List *l)
 {
@@ -328,30 +355,241 @@ static int cmp_room_idx(const void *a, const void *b)
     return rc_room_compare(&g_sort_rooms->items[*(const int *)a], &g_sort_rooms->items[*(const int *)b]);
 }
 
-/* Sidebar like the Rocket.Chat desktop client: collapsible Favorites,
- * Channels and Direct messages sections, each sorted by name. */
+static void mark_dirty(ULONG what)
+{
+    G.dirty |= what;
+}
+
+static int area_box(Object *o, struct IBox *out)
+{
+    struct IBox *b = NULL;
+    if (!G.win || !o)
+        return 0;
+    GetAttr(SPACE_AreaBox, o, (ULONG *)&b);
+    if (!b || b->Width <= 0 || b->Height <= 0)
+        return 0;
+    *out = *b;
+    return 1;
+}
+
+static void set_scroller(int id, int top, int visible, int total)
+{
+    if (!G.win)
+        return;
+    SetGadgetAttrs((struct Gadget *)G.g[id], G.win, NULL,
+                   SCROLLER_Total, (ULONG)(total > 0 ? total : 1),
+                   SCROLLER_Visible, (ULONG)(visible > 0 ? visible : 1),
+                   SCROLLER_Top, (ULONG)top, TAG_END);
+}
+
+static void draw_side(void)
+{
+    struct IBox box;
+    if (!area_box(G.g[G_ROOMS], &box))
+        return;
+    side_draw(&G.side, G.win->RPort, &box, &G.pens);
+    set_scroller(G_SIDESCROLL, G.side.top, G.side.visible, G.side.n);
+}
+
+static int sugg_row_h(void)
+{
+    return G.win->RPort->TxHeight + 6;
+}
+
+/* "People" panel over the bottom of the message view, like the desktop
+ * client's mention popup. */
+static void draw_suggestions(const struct IBox *box)
+{
+    struct RastPort *rp = G.win->RPort;
+    const ViewPens *p = &G.pens;
+    int rh = sugg_row_h(), rows = G.n_sugg + 1, i;
+    int top = box->Top + box->Height - rows * rh - 2, left = box->Left + 4, right = box->Left + box->Width - 5;
+    int base = rp->TxBaseline + 3;
+
+    if (top < box->Top)
+        top = box->Top;
+    SetDrMd(rp, JAM2);
+    SetAPen(rp, p->sep);
+    RectFill(rp, left, top, right, box->Top + box->Height - 1);
+    SetAPen(rp, p->side_bg);
+    RectFill(rp, left + 1, top + 1, right - 1, box->Top + box->Height - 2);
+    SetBPen(rp, p->side_bg);
+    SetAPen(rp, p->dim);
+    SetSoftStyle(rp, FSF_BOLD, AskSoftStyle(rp));
+    Move(rp, left + 8, top + base);
+    Text(rp, (CONST_STRPTR)"People", 6);
+    for (i = 0; i < G.n_sugg; i++) {
+        int y = top + (i + 1) * rh, x = left + 8, dot = rp->TxHeight / 2;
+        Buf b;
+        if (y + rh > box->Top + box->Height)
+            break;
+        if (i == 0) {
+            SetAPen(rp, p->side_sel);
+            RectFill(rp, left + 1, y, right - 1, y + rh - 1);
+        }
+        SetBPen(rp, i == 0 ? p->side_sel : p->side_bg);
+        /* presence dot */
+        SetAPen(rp, G.sugg[i].online ? p->avatar[2] : p->dim);
+        RectFill(rp, x, y + (rh - dot) / 2, x + dot - 1, y + (rh - dot) / 2 + dot - 1);
+        if (!G.sugg[i].online) {
+            SetAPen(rp, i == 0 ? p->side_sel : p->side_bg);
+            RectFill(rp, x + 1, y + (rh - dot) / 2 + 1, x + dot - 2, y + (rh - dot) / 2 + dot - 2);
+        }
+        x += dot + 8;
+        buf_init(&b);
+        to_latin1(&b, G.sugg[i].user, 0);
+        SetAPen(rp, p->text);
+        SetSoftStyle(rp, FSF_BOLD, AskSoftStyle(rp));
+        Move(rp, x, y + base);
+        Text(rp, (CONST_STRPTR)buf_str(&b), (ULONG)b.len);
+        x += TextLength(rp, (CONST_STRPTR)buf_str(&b), (ULONG)b.len) + 8;
+        SetSoftStyle(rp, 0, AskSoftStyle(rp));
+        if (G.sugg[i].name[0] && ar_strcasecmp(G.sugg[i].name, G.sugg[i].user)) {
+            buf_clear(&b);
+            buf_putc(&b, '(');
+            to_latin1(&b, G.sugg[i].name, 0);
+            buf_putc(&b, ')');
+            SetAPen(rp, p->dim);
+            Move(rp, x, y + base);
+            Text(rp, (CONST_STRPTR)buf_str(&b), (ULONG)b.len);
+        }
+        if (G.sugg[i].recent) {
+            static const char rec[] = "recent";
+            int w = TextLength(rp, (CONST_STRPTR)rec, 6);
+            SetAPen(rp, p->dim);
+            Move(rp, right - 8 - w, y + base);
+            Text(rp, (CONST_STRPTR)rec, 6);
+        }
+        buf_free(&b);
+    }
+    SetSoftStyle(rp, 0, AskSoftStyle(rp));
+    SetBPen(rp, p->bg);
+}
+
+static void draw_chat(void)
+{
+    struct IBox box;
+    if (!area_box(G.g[G_MSGS], &box))
+        return;
+    if (G.chat_relayout || G.chat.width != box.Width) {
+        ar_ms now = amiga_local_ms();
+        const char *empty = !G.connected ? "Not connected"
+                          : !G.cur_rid[0] ? "Select a room"
+                          : G.loading_rid[0] ? "Loading messages..." : "No messages yet";
+        chat_layout(&G.chat, G.win->RPort, box.Width, &G.msgs, G.tz_ms, ms_day_number(now),
+                    G.username, empty);
+        G.chat_relayout = 0;
+    }
+    chat_draw(&G.chat, G.win->RPort, &box, &G.pens);
+    set_scroller(G_CHATSCROLL, G.chat.top, G.chat.visible, G.chat.n);
+    if (G.n_sugg)
+        draw_suggestions(&box);
+}
+
+static void draw_header(void)
+{
+    struct IBox box;
+    const RcRoom *r = G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
+    Buf t, tp;
+
+    if (!area_box(G.g[G_ROOMHDR], &box))
+        return;
+    buf_init(&t);
+    buf_init(&tp);
+    if (r) {
+        room_label(&t, r, 0);
+        to_latin1(&tp, G.topic, 0);
+    } else {
+        buf_puts(&t, G.connected ? "Select a room" : "AmiRocket");
+    }
+    header_draw(G.win->RPort, &box, &G.pens, buf_str(&t), buf_str(&tp), r ? r->favorite : 0);
+    buf_free(&t);
+    buf_free(&tp);
+}
+
+static void redraw_dirty(void)
+{
+    ULONG d = G.dirty;
+    G.dirty = 0;
+    if (!G.win)
+        return;
+    if (d & DIRTY_SIDE)
+        draw_side();
+    if (d & DIRTY_HEADER)
+        draw_header();
+    if (d & DIRTY_CHAT)
+        draw_chat();
+}
+
+/* Called by space.gadget whenever it renders (window refresh, resize):
+ * defer to the main loop, which draws with our own data. */
+static ULONG render_hook_func(struct Hook *h, Object *o, APTR msg)
+{
+    G.dirty |= o == G.g[G_ROOMS] ? DIRTY_SIDE : o == G.g[G_MSGS] ? DIRTY_CHAT : DIRTY_HEADER;
+    if (G.dirty_sig >= 0)
+        Signal((struct Task *)G.port->mp_SigTask, 1UL << G.dirty_sig);
+    return 0;
+}
+
+static void scroll_side(int top)
+{
+    side_scroll_to(&G.side, top);
+    draw_side();
+}
+
+static void scroll_chat(int top)
+{
+    chat_scroll_to(&G.chat, top);
+    draw_chat();
+}
+
+static int over(Object *o, WORD mx, WORD my)
+{
+    struct IBox b;
+    return area_box(o, &b) && mx >= b.Left && mx < b.Left + b.Width && my >= b.Top && my < b.Top + b.Height;
+}
+
+static void update_suggestions(void);
+static void redraw_dirty(void);
+
+/* IDCMP hook: live scroller dragging and the mouse wheel. Runs in our task
+ * from inside RA_HandleInput(). */
+static ULONG idcmp_hook_func(struct Hook *h, APTR obj, struct IntuiMessage *im)
+{
+    if (im->Class == IDCMP_IDCMPUPDATE) {
+        struct TagItem *tags = (struct TagItem *)im->IAddress;
+        struct TagItem *ti = FindTagItem(GA_ID, tags), *top = FindTagItem(SCROLLER_Top, tags);
+        if (ti && ti->ti_Data == G_INPUT) {
+            update_suggestions();
+            redraw_dirty();
+        } else if (ti && top) {
+            if (ti->ti_Data == G_SIDESCROLL)
+                scroll_side((int)top->ti_Data);
+            else if (ti->ti_Data == G_CHATSCROLL)
+                scroll_chat((int)top->ti_Data);
+        }
+    } else if (im->Class == IDCMP_EXTENDEDMOUSE && (im->Code & IMSGCODE_INTUIWHEELDATA)) {
+        struct IntuiWheelData *wd = (struct IntuiWheelData *)im->IAddress;
+        int dy = wd->WheelY * 3;
+        if (over(G.g[G_ROOMS], im->MouseX, im->MouseY))
+            scroll_side(G.side.top + dy);
+        else
+            scroll_chat(G.chat.top + dy);
+    }
+    return 0;
+}
+
 static void rooms_rebuild(void)
 {
-    struct Node *n, *sel = NULL;
     int *order, i, s;
     Buf b;
 
-    if (G.win)
-        SetGadgetAttrs((struct Gadget *)G.g[G_ROOMS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
-    /* keep the user's collapsed/expanded choice across rebuilds */
-    for (n = G.room_list.lh_Head; n->ln_Succ; n = n->ln_Succ) {
-        ULONG gen = 0, flags = 0, ud = 0;
-        GetListBrowserNodeAttrs(n, LBNA_Generation, (ULONG)&gen, LBNA_Flags, (ULONG)&flags,
-                                LBNA_UserData, (ULONG)&ud, TAG_END);
-        if (gen == 1 && ud >= 1 && ud <= SEC_N)
-            G.collapsed[ud - 1] = !(flags & LBFLG_SHOWCHILDREN);
-    }
-    free_list(&G.room_list);
-
+    side_clear(&G.side);
     order = (int *)ar_malloc(sizeof(int) * (size_t)(G.rooms.count + 1));
     buf_init(&b);
     for (s = 0; order && s < SEC_N; s++) {
         int cnt = 0;
+        SRow *row;
         for (i = 0; i < G.rooms.count; i++) {
             const RcRoom *r = &G.rooms.items[i];
             /* rooms hidden in Rocket.Chat ("open": false) stay hidden, unless
@@ -365,234 +603,241 @@ static void rooms_rebuild(void)
             continue;
         g_sort_rooms = &G.rooms;
         qsort(order, (size_t)cnt, sizeof(int), cmp_room_idx);
-        n = AllocListBrowserNode(1,
-                                 LBNA_Generation, 1,
-                                 LBNA_Flags, LBFLG_HASCHILDREN | (G.collapsed[s] ? 0 : LBFLG_SHOWCHILDREN),
-                                 LBNA_UserData, (ULONG)(s + 1),
-                                 LBNA_Column, 0,
-                                 LBNCA_CopyText, TRUE,
-                                 LBNCA_Text, (ULONG)g_sec_names[s],
-                                 TAG_END);
-        if (n)
-            AddTail(&G.room_list, n);
+        if (G.side.n && (row = side_add(&G.side)) != NULL)
+            row->kind = SR_GAP;
+        if ((row = side_add(&G.side)) != NULL) {
+            row->kind = SR_SECTION;
+            row->section = (UBYTE)s;
+            row->collapsed = (UBYTE)G.collapsed[s];
+            ar_strlcpy(row->label, g_sec_names[s], sizeof(row->label));
+        }
+        if (G.collapsed[s])
+            continue;
         for (i = 0; i < cnt; i++) {
             const RcRoom *r = &G.rooms.items[order[i]];
+            const char *lab;
+            if (!(row = side_add(&G.side)))
+                break;
+            row->kind = SR_ROOM;
+            row->section = (UBYTE)s;
+            row->rid = r->rid;
+            row->glyph = r->type == 'd' ? '@' : r->type == 'p' ? '*' : '#';
+            row->selected = !strcmp(r->rid, G.cur_rid);
+            row->bold = r->unread > 0 || r->alert;
+            row->count = (WORD)(r->unread > 0 ? (r->unread > 999 ? 999 : r->unread) : r->alert ? -1 : 0);
             buf_clear(&b);
-            room_label(&b, r, 1);
-            n = AllocListBrowserNode(1,
-                                     LBNA_Generation, 2,
-                                     LBNA_Flags, (G.collapsed[s] ? LBFLG_HIDDEN : 0) |
-                                                 ((r->unread || r->alert) ? LBFLG_CUSTOMPENS : 0),
-                                     LBNA_UserData, (ULONG)r->rid,
-                                     LBNA_Column, 0,
-                                     LBNCA_CopyText, TRUE,
-                                     LBNCA_Text, (ULONG)buf_str(&b),
-                                     (r->unread || r->alert) ? LBNCA_FGPen : TAG_IGNORE, (ULONG)G.hipen,
-                                     TAG_END);
-            if (n) {
-                AddTail(&G.room_list, n);
-                if (!strcmp(r->rid, G.cur_rid))
-                    sel = n;
-            }
+            room_label(&b, r, 0);
+            lab = buf_str(&b);
+            if (b.len > 2)
+                lab += 2;   /* the glyph is drawn separately */
+            ar_strlcpy(row->label, lab, sizeof(row->label));
         }
     }
     buf_free(&b);
     ar_free(order);
-    if (G.win)
-        SetGadgetAttrs((struct Gadget *)G.g[G_ROOMS], G.win, NULL,
-                       LISTBROWSER_Labels, (ULONG)&G.room_list,
-                       sel ? LISTBROWSER_SelectedNode : LISTBROWSER_Selected, sel ? (ULONG)sel : (ULONG)-1,
-                       TAG_END);
+    mark_dirty(DIRTY_SIDE | DIRTY_HEADER);
 }
 
-/* Two columns: a narrow empty gutter (where the desktop client shows
- * avatars) and the text, so wrapped lines stay aligned under the text. */
-static struct ColumnInfo g_msg_cols[] = {
-    { 3,  (STRPTR)"", 0 },
-    { 97, (STRPTR)"", 0 },
-    { -1, NULL, 0 }
-};
-
-static int add_row(const char *text, int pen)
-{
-    struct Node *n = AllocListBrowserNode(2,
-        LBNA_Flags, pen >= 0 ? LBFLG_CUSTOMPENS : 0,   /* FGPen is ignored without it */
-        LBNA_Column, 0,
-            LBNCA_CopyText, TRUE,
-            LBNCA_Text, (ULONG)"",
-        LBNA_Column, 1,
-            LBNCA_CopyText, TRUE,
-            LBNCA_Text, (ULONG)text,
-            LBNCA_WordWrap, TRUE,
-            pen >= 0 ? LBNCA_FGPen : TAG_IGNORE, (ULONG)pen,
-        TAG_END);
-    if (!n)
-        return 0;
-    AddTail(&G.msg_list, n);
-    return 1;
-}
-
-static int mentions_me(const char *utf8)
-{
-    char tag[100];
-    const char *p;
-    size_t n;
-
-    if (!G.username[0] || !utf8)
-        return 0;
-    snprintf(tag, sizeof(tag), "@%s", G.username);
-    n = strlen(tag);
-    for (p = utf8; (p = strchr(p, '@')) != NULL; p++) {
-        size_t l = 0;
-        if (!ar_strncasecmp(p, tag, n))
-            l = n;
-        else if (!strncmp(p, "@all", 4))
-            l = 4;
-        else if (!strncmp(p, "@here", 5))
-            l = 5;
-        if (l) {
-            char c = p[l];
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                  c == '.' || c == '_' || c == '-'))
-                return 1;
-        }
-    }
-    return 0;
-}
-
-static void day_label(char *out, size_t sz, ar_ms local, long today)
-{
-    static const char *wd[] = { "Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday" };
-    static const char *mo[] = { "January", "February", "March", "April", "May", "June", "July",
-                                "August", "September", "October", "November", "December" };
-    long day = ms_day_number(local), y;
-    unsigned m, d;
-
-    if (day == today) {
-        snprintf(out, sz, "------------  Today  ------------");
-        return;
-    }
-    if (day == today - 1) {
-        snprintf(out, sz, "------------  Yesterday  ------------");
-        return;
-    }
-    civil_from_days(day, &y, &m, &d);
-    snprintf(out, sz, "------------  %s %u %s %ld  ------------",
-             wd[((day % 7) + 7) % 7], d, mo[m - 1], y);
-}
-
-/* Message view laid out like the Rocket.Chat client: a "name  time" header
- * for each run of messages from the same sender, the messages indented
- * below it, and a separator for each day. */
 static void msgs_rebuild(int scroll_bottom)
 {
-    long lastday = -1, today = ms_day_number(amiga_local_ms());
-    const char *prev_user = NULL;
-    ar_ms prev_ts = 0;
-    int i, rows = 0;
-    Buf text, md, line;
+    G.chat_relayout = 1;
+    if (scroll_bottom)
+        G.chat.follow = 1;
+    mark_dirty(DIRTY_CHAT);
+}
 
-    if (G.win)
-        SetGadgetAttrs((struct Gadget *)G.g[G_MSGS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
-    free_list(&G.msg_list);
-    buf_init(&text);
-    buf_init(&md);
-    buf_init(&line);
-    for (i = 0; i < G.msgs.count; i++) {
+static int is_name_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == '.' || c == '_' || c == '-' || c >= 0xC0;
+}
+
+static void add_sugg(const char *user, const char *name, int online, int recent, const char *prefix)
+{
+    int i;
+    size_t pl = strlen(prefix);
+
+    if (G.n_sugg >= MAX_SUGG || !user || !*user)
+        return;
+    if (pl && ar_strncasecmp(user, prefix, pl) != 0 && (!name || ar_strncasecmp(name, prefix, pl) != 0))
+        return;
+    for (i = 0; i < G.n_sugg; i++)
+        if (!strcmp(G.sugg[i].user, user)) {
+            if (online)
+                G.sugg[i].online = 1;
+            return;
+        }
+    ar_strlcpy(G.sugg[G.n_sugg].user, user, sizeof(G.sugg[0].user));
+    ar_strlcpy(G.sugg[G.n_sugg].name, name ? name : "", sizeof(G.sugg[0].name));
+    G.sugg[G.n_sugg].online = online;
+    G.sugg[G.n_sugg].recent = recent;
+    G.n_sugg++;
+}
+
+static void hide_suggestions(void)
+{
+    if (G.n_sugg) {
+        G.n_sugg = 0;
+        mark_dirty(DIRTY_CHAT);
+    }
+}
+
+/* Looks at the word under the cursor: "@pre" opens the People panel. */
+static void update_suggestions(void)
+{
+    STRPTR txt = NULL;
+    ULONG pos = 0;
+    int at, i, old = G.n_sugg;
+    Buf pre;
+
+    if (!G.win || !G.connected || !G.cur_rid[0]) {
+        hide_suggestions();
+        return;
+    }
+    GetAttr(STRINGA_TextVal, G.g[G_INPUT], (ULONG *)&txt);
+    GetAttr(STRINGA_BufferPos, G.g[G_INPUT], &pos);
+    if (!txt) {
+        hide_suggestions();
+        return;
+    }
+    if (pos > strlen((char *)txt))
+        pos = (ULONG)strlen((char *)txt);
+    at = (int)pos;
+    while (at > 0 && is_name_char((unsigned char)txt[at - 1]))
+        at--;
+    if (at == 0 || txt[at - 1] != '@' || (at >= 2 && txt[at - 2] != ' ')) {
+        hide_suggestions();
+        return;
+    }
+    G.sugg_at = at - 1;
+    G.sugg_end = (int)pos;
+    buf_init(&pre);
+    buf_append(&pre, (const char *)txt + at, (size_t)(pos - (ULONG)at));
+    {   /* the prefix as UTF-8 for matching */
+        Buf u;
+        buf_init(&u);
+        latin1_to_utf8(&u, buf_str(&pre));
+        buf_free(&pre);
+        pre = u;
+    }
+
+    G.n_sugg = 0;
+    /* 1. recent senders, newest first */
+    for (i = G.msgs.count - 1; i >= 0 && G.n_sugg < MAX_SUGG; i--) {
         const RcMsg *m = &G.msgs.items[i];
-        ar_ms local = m->ts_ms + G.tz_ms;
-        long day = ms_day_number(local);
-        const char *sys = rc_system_text(m->type);
-        char hm[8];
-        char *p, *nl;
-        int pen = -1;
-
-        if (day != lastday) {
-            char sep[80];
-            if (rows)
-                rows += add_row("", -1);
-            day_label(sep, sizeof(sep), local, today);
-            rows += add_row(sep, -1);
-            lastday = day;
-            prev_user = NULL;
-        }
-        ms_format_hm(local, hm);
-
-        if (sys) {
-            buf_clear(&text);
-            buf_puts(&text, "* ");
-            to_latin1(&text, m->username, 0);
-            buf_putc(&text, ' ');
-            buf_puts(&text, sys);
-            if (m->text && *m->text && strcmp(m->type, "rm") != 0) {
-                buf_putc(&text, ' ');
-                to_latin1(&text, m->text, 0);
+        if (!m->type && strcmp(m->username, G.username) != 0)
+            add_sugg(m->username, m->name, 0, 1, buf_str(&pre));
+    }
+    /* 2. other room members */
+    if (G.members) {
+        const char *l = G.members;
+        while (*l && G.n_sugg < MAX_SUGG) {
+            const char *e = strchr(l, '\n'), *t1, *t2;
+            char user[96], name[96];
+            size_t n;
+            if (!e)
+                e = l + strlen(l);
+            t1 = (const char *)memchr(l, '\t', (size_t)(e - l));
+            t2 = t1 ? (const char *)memchr(t1 + 1, '\t', (size_t)(e - t1 - 1)) : NULL;
+            if (t1 && t2) {
+                n = (size_t)(t1 - l) < sizeof(user) ? (size_t)(t1 - l) : sizeof(user) - 1;
+                memcpy(user, l, n);
+                user[n] = 0;
+                n = (size_t)(t2 - t1 - 1) < sizeof(name) ? (size_t)(t2 - t1 - 1) : sizeof(name) - 1;
+                memcpy(name, t1 + 1, n);
+                name[n] = 0;
+                add_sugg(user, name, (size_t)(e - t2 - 1) == 6 && !strncmp(t2 + 1, "online", 6), 0, buf_str(&pre));
             }
-            buf_printf(&text, "   %s", hm);
-            rows += add_row(buf_str(&text), -1);
-            prev_user = NULL;
-            continue;
-        }
-
-        if (!prev_user || strcmp(prev_user, m->username) != 0 || m->ts_ms - prev_ts > GROUP_GAP_MS || m->tmid) {
-            if (rows)
-                rows += add_row("", -1);
-            buf_clear(&text);
-            to_latin1(&text, m->username, 0);
-            if (m->name && *m->name && ar_strcasecmp(m->name, m->username)) {
-                buf_puts(&text, "  (");
-                to_latin1(&text, m->name, 0);
-                buf_putc(&text, ')');
-            }
-            buf_printf(&text, "   %s", hm);
-            if (m->tmid)
-                buf_puts(&text, "   [reply in thread]");
-            rows += add_row(buf_str(&text), G.fillpen);
-        }
-        prev_user = m->username;
-        prev_ts = m->ts_ms;
-
-        buf_clear(&md);
-        md_to_plain(&md, m->text);
-        buf_clear(&text);
-        to_latin1(&text, buf_str(&md), 1);
-        if (m->n_attachments) {
-            if (text.len)
-                buf_putc(&text, '\n');
-            buf_puts(&text, "[file: ");
-            to_latin1(&text, m->attachment ? m->attachment : "attachment", 0);
-            buf_putc(&text, ']');
-        }
-        if (m->edited)
-            buf_puts(&text, "  (edited)");
-        if (mentions_me(m->text))
-            pen = G.hipen;
-
-        /* one row per line, indented under the sender like the original */
-        p = text.data ? text.data : (char *)"";
-        for (;;) {
-            nl = strchr(p, '\n');
-            if (nl)
-                *nl = 0;
-            buf_clear(&line);
-            buf_puts(&line, p);
-            rows += add_row(buf_str(&line), pen);
-            if (!nl)
-                break;
-            p = nl + 1;
+            l = *e ? e + 1 : e;
         }
     }
-    buf_free(&text);
-    buf_free(&md);
-    buf_free(&line);
-    if (G.win) {
-        SetGadgetAttrs((struct Gadget *)G.g[G_MSGS], G.win, NULL,
-                       LISTBROWSER_Labels, (ULONG)&G.msg_list,
-                       LISTBROWSER_Selected, (ULONG)-1, TAG_END);
-        if (scroll_bottom && rows > 0)
-            SetGadgetAttrs((struct Gadget *)G.g[G_MSGS], G.win, NULL,
-                           LISTBROWSER_MakeVisible, (ULONG)(rows - 1), TAG_END);
+    /* 3. @here / @all for channels */
+    add_sugg("here", "notify active users", 0, 0, buf_str(&pre));
+    add_sugg("all", "notify everyone", 0, 0, buf_str(&pre));
+    buf_free(&pre);
+    if (G.n_sugg || old)
+        mark_dirty(DIRTY_CHAT);
+}
+
+/* Replaces "@pre" in the input with "@username ". */
+static void complete_suggestion(int i)
+{
+    STRPTR txt = NULL;
+    Buf b, u;
+    int len;
+
+    if (i < 0 || i >= G.n_sugg)
+        return;
+    GetAttr(STRINGA_TextVal, G.g[G_INPUT], (ULONG *)&txt);
+    if (!txt)
+        return;
+    len = (int)strlen((char *)txt);
+    if (G.sugg_at < 0 || G.sugg_at > len || G.sugg_end > len || G.sugg_end < G.sugg_at)
+        return;
+    buf_init(&b);
+    buf_init(&u);
+    utf8_to_latin1(&u, G.sugg[i].user, 0);
+    buf_append(&b, txt, (size_t)G.sugg_at);
+    buf_putc(&b, '@');
+    buf_puts(&b, buf_str(&u));
+    buf_putc(&b, ' ');
+    {
+        int cursor = (int)b.len;
+        buf_puts(&b, (const char *)txt + G.sugg_end);
+        SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL,
+                       STRINGA_TextVal, (ULONG)buf_str(&b),
+                       STRINGA_BufferPos, (ULONG)cursor, TAG_END);
     }
+    buf_free(&b);
+    buf_free(&u);
+    hide_suggestions();
+    ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
+}
+
+static void on_chat_click(void)
+{
+    struct IBox box;
+    int rh, rows, top, i;
+
+    if (!G.n_sugg || !area_box(G.g[G_MSGS], &box))
+        return;
+    rh = sugg_row_h();
+    rows = G.n_sugg + 1;
+    top = box.Top + box.Height - rows * rh - 2;
+    i = (G.win->MouseY - top) / rh - 1;
+    if (G.win->MouseY >= top && i >= 0 && i < G.n_sugg)
+        complete_suggestion(i);
+}
+
+static void on_side_click(void)
+{
+    struct IBox box;
+    int i;
+
+    if (!area_box(G.g[G_ROOMS], &box))
+        return;
+    i = side_hit(&G.side, G.win->MouseY - box.Top);
+    if (i < 0)
+        return;
+    if (G.side.r[i].kind == SR_SECTION) {
+        int s = G.side.r[i].section;
+        G.collapsed[s] = !G.collapsed[s];
+        rooms_rebuild();
+        return;
+    }
+    if (G.side.r[i].kind != SR_ROOM || !G.side.r[i].rid || !strcmp(G.side.r[i].rid, G.cur_rid))
+        return;
+    ar_strlcpy(G.cur_rid, G.side.r[i].rid, sizeof(G.cur_rid));
+    G.topic[0] = 0;
+    ar_free(G.members);
+    G.members = NULL;
+    G.n_sugg = 0;
+    rc_msglist_free(&G.msgs);
+    cmd_open_room(G.cur_rid);
+    rooms_rebuild();
+    msgs_rebuild(1);
+    update_title();
+    ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
 }
 
 /* ---- commands ------------------------------------------------------ */
@@ -666,6 +911,7 @@ static void cmd_send_input(void)
     m->a_text = t;
     send_cmd(m);
     SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL, STRINGA_TextVal, (ULONG)"", TAG_END);
+    hide_suggestions();
     ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
 }
 
@@ -917,8 +1163,13 @@ static void on_room_opened(NetMsg *m)
     }
     rc_msglist_free(&G.msgs);
     rc_msglist_merge(&G.msgs, &m->msgs, MAX_MESSAGES);
+    ar_strlcpy(G.topic, m->topic, sizeof(G.topic));
+    ar_free(G.members);
+    G.members = m->members;
+    m->members = NULL;
     update_tz(m->server_now);
     msgs_rebuild(1);
+    mark_dirty(DIRTY_HEADER);
     {
         char s[64];
         snprintf(s, sizeof(s), "%d messages", G.msgs.count);
@@ -969,7 +1220,7 @@ static void on_update(NetMsg *m)
     }
     if ((m->msgs.count || m->msgs.n_deleted) && !strcmp(m->rid, G.cur_rid)) {
         rc_msglist_merge(&G.msgs, &m->msgs, MAX_MESSAGES);
-        msgs_rebuild(1);
+        msgs_rebuild(G.chat.follow);
         if (G.win && !(G.win->Flags & WFLG_WINDOWACTIVE))
             DisplayBeep(G.scr);
     }
@@ -1016,31 +1267,6 @@ static void handle_port(void)
 
 /* ---- main window --------------------------------------------------- */
 
-static void on_room_clicked(void)
-{
-    struct Node *n = NULL;
-    char *rid = NULL;
-
-    ULONG gen = 0;
-
-    GetAttr(LISTBROWSER_SelectedNode, G.g[G_ROOMS], (ULONG *)&n);
-    if (!n)
-        return;
-    GetListBrowserNodeAttrs(n, LBNA_Generation, (ULONG)&gen, LBNA_UserData, (ULONG)&rid, TAG_END);
-    if (gen != 2) {
-        rooms_rebuild();   /* a section header: keep the open room selected */
-        return;
-    }
-    if (!rid || !strcmp(rid, G.cur_rid))
-        return;
-    ar_strlcpy(G.cur_rid, rid, sizeof(G.cur_rid));
-    rc_msglist_free(&G.msgs);
-    msgs_rebuild(0);
-    update_title();
-    cmd_open_room(G.cur_rid);
-    ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
-}
-
 static void about(void)
 {
     snprintf(G.about, sizeof(G.about),
@@ -1055,7 +1281,7 @@ static void apply_theme(int idx);
 
 static void handle_menu(UWORD code)
 {
-    int theme = -1;
+    int theme = -1, force_reopen = 0;
 
     while (code != MENUNULL) {
         struct MenuItem *item = ItemAddress(G.menu, code);
@@ -1072,6 +1298,11 @@ static void handle_menu(UWORD code)
         case M_ABOUT:      about(); break;
         case M_QUIT:       G.quit = 1; break;
         case M_REFRESH:    if (G.connected) cmd_simple(NC_POLL_NOW); break;
+        case M_OWNSCREEN:
+            G.prefs.ownscreen = (item->Flags & CHECKED) != 0;
+            theme = theme_find(G.prefs.theme);
+            force_reopen = 1;
+            break;
         default:
             if ((ULONG)GTMENUITEM_USERDATA(item) >= M_THEME_BASE)
                 theme = (int)((ULONG)GTMENUITEM_USERDATA(item) - M_THEME_BASE);
@@ -1080,7 +1311,7 @@ static void handle_menu(UWORD code)
         code = item->NextSelect;
     }
     /* after the loop: switching themes frees the menu strip */
-    if (theme >= 0 && theme != theme_find(G.prefs.theme))
+    if (theme >= 0 && (force_reopen || theme != theme_find(G.prefs.theme)))
         apply_theme(theme);
 }
 
@@ -1097,14 +1328,42 @@ static void handle_main(void)
         case WMHI_MENUPICK:
             handle_menu(code);
             break;
+        case WMHI_NEWSIZE:
+            G.chat_relayout = 1;
+            mark_dirty(DIRTY_SIDE | DIRTY_CHAT | DIRTY_HEADER);
+            break;
+        case WMHI_RAWKEY:
+            /* NewMouse wheel codes, for mouse drivers without V47 wheel events */
+            if ((result & WMHI_KEYMASK) == 0x7A)
+                scroll_chat(G.chat.top - 3);
+            else if ((result & WMHI_KEYMASK) == 0x7B)
+                scroll_chat(G.chat.top + 3);
+            break;
         case WMHI_GADGETUP:
             switch (result & WMHI_GADGETMASK) {
             case G_ROOMS:
-                on_room_clicked();
+                on_side_click();
                 break;
+            case G_SIDESCROLL: {
+                ULONG top = 0;
+                GetAttr(SCROLLER_Top, G.g[G_SIDESCROLL], &top);
+                scroll_side((int)top);
+                break;
+            }
+            case G_CHATSCROLL: {
+                ULONG top = 0;
+                GetAttr(SCROLLER_Top, G.g[G_CHATSCROLL], &top);
+                scroll_chat((int)top);
+                break;
+            }
             case G_INPUT:
-                if (code != 9 && code != 0x5F)   /* not Tab / Help */
+                if (G.n_sugg && (code == 9 || code == 13 || code == 10 || code == 0))
+                    complete_suggestion(0);   /* Return/Tab: take the top match */
+                else if (code != 9 && code != 0x5F)   /* not Tab / Help */
                     cmd_send_input();
+                break;
+            case G_MSGS:
+                on_chat_click();
                 break;
             case G_SEND:
                 cmd_send_input();
@@ -1162,6 +1421,8 @@ static int open_libs(void)
         { &ListBrowserBase, "gadgets/listbrowser.gadget", 44 },
         { &CheckBoxBase, "gadgets/checkbox.gadget", 44 },
         { &LabelBase, "images/label.image", 44 },
+        { &SpaceBase, "gadgets/space.gadget", 44 },
+        { &ScrollerBase, "gadgets/scroller.gadget", 44 },
         { NULL, NULL, 0 }
     };
     int i;
@@ -1189,7 +1450,7 @@ static int open_libs(void)
 static void close_libs(void)
 {
     struct Library **all[] = {
-        &LabelBase, &CheckBoxBase, &ListBrowserBase, &StringBase, &ButtonBase, &LayoutBase,
+        &ScrollerBase, &SpaceBase, &LabelBase, &CheckBoxBase, &ListBrowserBase, &StringBase, &ButtonBase, &LayoutBase,
         &WindowBase, &UtilityBase, &GadToolsBase, (struct Library **)&GfxBase,
         (struct Library **)&LocaleBase, (struct Library **)&IntuitionBase, NULL
     };
@@ -1207,7 +1468,7 @@ static int open_screen(void)
     const Theme *t = theme_get(theme_find(G.prefs.theme));
 
     G.own_screen = 0;
-    if (!t->workbench) {
+    if (!t->workbench && G.prefs.ownscreen) {
         struct Screen *wb = LockPubScreen((CONST_STRPTR)"Workbench");
         ULONG depth = 4;
         if (wb) {
@@ -1269,6 +1530,9 @@ static void build_menu(void)
     if (!G.newmenu)
         return;
     memcpy(G.newmenu, g_newmenu, sizeof(struct NewMenu) * (size_t)BASE_MENU_ITEMS);
+    for (i = 0; i < BASE_MENU_ITEMS; i++)
+        if ((ULONG)G.newmenu[i].nm_UserData == M_OWNSCREEN && G.prefs.ownscreen)
+            G.newmenu[i].nm_Flags |= CHECKED;
     for (i = 0, k = BASE_MENU_ITEMS; i < n; i++, k++) {
         const Theme *t = theme_get(i);
         G.newmenu[k].nm_Type = NM_SUB;
@@ -1283,11 +1547,84 @@ static void build_menu(void)
         LayoutMenus(G.menu, G.vi, GTMN_NewLookMenus, TRUE, TAG_END);
 }
 
+/* Theme colours as pens on the screen in use: exact on the theme's own
+ * screen, nearest free/shared colours on Workbench. */
+static LONG pen_rgb(ULONG rgb)
+{
+    struct ColorMap *cm = G.scr->ViewPort.ColorMap;
+    LONG pen = ObtainBestPen(cm, ((rgb >> 16) & 0xFF) * 0x01010101UL, ((rgb >> 8) & 0xFF) * 0x01010101UL,
+                             (rgb & 0xFF) * 0x01010101UL, OBP_Precision, PRECISION_IMAGE, TAG_END);
+    if (pen >= 0 && G.n_obtained < (int)(sizeof(G.obtained) / sizeof(G.obtained[0])))
+        G.obtained[G.n_obtained++] = pen;
+    return pen >= 0 ? pen : 1;
+}
+
+static void alloc_pens(void)
+{
+    const Theme *t = theme_get(theme_find(G.prefs.theme));
+    ViewPens *p = &G.pens;
+
+    G.n_obtained = 0;
+    if (t->workbench) {
+        struct DrawInfo *dri = GetScreenDrawInfo(G.scr);
+        UWORD *dp = dri ? dri->dri_Pens : NULL;
+        p->bg = dp ? dp[BACKGROUNDPEN] : 0;
+        p->text = dp ? dp[TEXTPEN] : 1;
+        p->dim = dp ? dp[FILLPEN] : 3;
+        p->accent = dp ? dp[FILLPEN] : 3;
+        p->accent_text = dp ? dp[FILLTEXTPEN] : 2;
+        p->highlight = dp ? dp[HIGHLIGHTTEXTPEN] : 2;
+        p->side_bg = p->bg;
+        p->side_sel = dp ? dp[SHINEPEN] : 2;
+        p->side_text = p->text;
+        p->side_dim = p->dim;
+        p->sep = dp ? dp[SHADOWPEN] : 1;
+        p->pill_bg = p->side_sel;
+        if (dri)
+            FreeScreenDrawInfo(G.scr, dri);
+        p->avatar[0] = pen_rgb(0x4A7FD4);
+        p->avatar[1] = pen_rgb(0xD45A4A);
+        p->avatar[2] = pen_rgb(0x4AA65A);
+        p->avatar[3] = pen_rgb(0xD49A3A);
+        p->avatar[4] = pen_rgb(0x8A5AC4);
+        p->avatar[5] = pen_rgb(0x3AA6A6);
+        return;
+    }
+    p->bg = pen_rgb(t->rgb[TC_BG]);
+    p->text = pen_rgb(t->rgb[TC_TEXT]);
+    p->dim = pen_rgb(t->rgb[TC_EXTRA2]);
+    p->accent = pen_rgb(t->rgb[TC_FILL]);
+    p->accent_text = pen_rgb(t->rgb[TC_FILLTEXT]);
+    p->highlight = pen_rgb(t->rgb[TC_HIGHLIGHT]);
+    p->side_bg = pen_rgb(t->rgb[TC_BARBLOCK]);
+    p->side_sel = pen_rgb(t->rgb[TC_EXTRA1]);
+    p->side_text = p->text;
+    p->side_dim = p->dim;
+    p->sep = p->side_sel;
+    p->pill_bg = p->side_sel;
+    p->avatar[0] = p->accent;
+    p->avatar[1] = pen_rgb(t->rgb[TC_BARTRIM]);
+    p->avatar[2] = pen_rgb(t->rgb[TC_EXTRA3]);
+    p->avatar[3] = pen_rgb(t->rgb[TC_EXTRA4]);
+    p->avatar[4] = pen_rgb(t->rgb[TC_EXTRA5]);
+    p->avatar[5] = pen_rgb(t->rgb[TC_EXTRA6]);
+}
+
+static void free_pens(void)
+{
+    int i;
+    if (!G.scr)
+        return;
+    for (i = 0; i < G.n_obtained; i++)
+        ReleasePen(G.scr->ViewPort.ColorMap, (ULONG)G.obtained[i]);
+    G.n_obtained = 0;
+}
+
 static int open_main(void)
 {
     Object *root;
     struct DrawInfo *dri;
-    ULONG minside;
+    ULONG minside, hdr_h;
 
     if (open_screen() < 0)
         return -1;
@@ -1297,45 +1634,72 @@ static int open_main(void)
     if (dri)
         FreeScreenDrawInfo(G.scr, dri);
     /* room list wide enough for about 22 characters of the screen font */
-    minside = (ULONG)(G.scr->RastPort.Font ? G.scr->RastPort.Font->tf_XSize : 8) * 22;
+    minside = (ULONG)(G.scr->RastPort.Font ? G.scr->RastPort.Font->tf_XSize : 8) * 24;
+    hdr_h = (ULONG)(G.scr->RastPort.Font ? G.scr->RastPort.Font->tf_YSize : 8) * 2 + 2;
+    alloc_pens();
     G.vi = GetVisualInfo(G.scr, TAG_END);
     build_menu();
 
+    G.render_hook.h_Entry = (HOOKFUNC)HookEntry;
+    G.render_hook.h_SubEntry = (HOOKFUNC)render_hook_func;
+    G.idcmp_hook.h_Entry = (HOOKFUNC)HookEntry;
+    G.idcmp_hook.h_SubEntry = (HOOKFUNC)idcmp_hook_func;
+
     root = G.g[0] = VLayoutObject,
-        LAYOUT_SpaceOuter, TRUE,
+        LAYOUT_SpaceOuter, FALSE,
+        LAYOUT_InnerSpacing, 0,
         LAYOUT_DeferLayout, TRUE,
         LAYOUT_AddChild, HLayoutObject,
-            LAYOUT_AddChild, G.g[G_ROOMS] = ListBrowserObject,
+            LAYOUT_InnerSpacing, 0,
+            LAYOUT_AddChild, G.g[G_ROOMS] = SpaceObject,
                 GA_ID, G_ROOMS,
                 GA_RelVerify, TRUE,
-                LISTBROWSER_Labels, (ULONG)&G.room_list,
-                LISTBROWSER_Hierarchical, TRUE,
-                LISTBROWSER_ShowSelected, TRUE,
-                LISTBROWSER_AutoWheel, TRUE,
+                SPACE_Transparent, TRUE,
+                SPACE_RenderHook, (ULONG)&G.render_hook,
             End,
             CHILD_WeightedWidth, 28,
             CHILD_MinWidth, minside,
+            LAYOUT_AddChild, G.g[G_SIDESCROLL] = ScrollerObject,
+                GA_ID, G_SIDESCROLL,
+                GA_RelVerify, TRUE,
+                SCROLLER_Orientation, SORIENT_VERT,
+                SCROLLER_Arrows, TRUE,
+                ICA_TARGET, ICTARGET_IDCMP,
+            End,
+            CHILD_WeightedWidth, 0,
             LAYOUT_AddChild, VLayoutObject,
-                LAYOUT_AddChild, G.g[G_ROOMHDR] = ButtonObject,
+                LAYOUT_InnerSpacing, 0,
+                LAYOUT_AddChild, G.g[G_ROOMHDR] = SpaceObject,
                     GA_ID, G_ROOMHDR,
-                    GA_ReadOnly, TRUE,
-                    GA_Text, (ULONG)G.roomhdr,
-                    BUTTON_Justification, BCJ_LEFT,
+                    SPACE_Transparent, TRUE,
+                    SPACE_MinHeight, hdr_h,
+                    SPACE_RenderHook, (ULONG)&G.render_hook,
                 End,
                 CHILD_WeightedHeight, 0,
-                LAYOUT_AddChild, G.g[G_MSGS] = ListBrowserObject,
-                    GA_ID, G_MSGS,
-                    GA_ReadOnly, TRUE,
-                    LISTBROWSER_Labels, (ULONG)&G.msg_list,
-                    LISTBROWSER_ColumnInfo, (ULONG)g_msg_cols,
-                    LISTBROWSER_WrapText, TRUE,
-                    LISTBROWSER_AutoWheel, TRUE,
+                LAYOUT_AddChild, HLayoutObject,
+                    LAYOUT_InnerSpacing, 0,
+                    LAYOUT_AddChild, G.g[G_MSGS] = SpaceObject,
+                        GA_ID, G_MSGS,
+                        GA_RelVerify, TRUE,
+                        SPACE_Transparent, TRUE,
+                        SPACE_RenderHook, (ULONG)&G.render_hook,
+                    End,
+                    LAYOUT_AddChild, G.g[G_CHATSCROLL] = ScrollerObject,
+                        GA_ID, G_CHATSCROLL,
+                        GA_RelVerify, TRUE,
+                        SCROLLER_Orientation, SORIENT_VERT,
+                        SCROLLER_Arrows, TRUE,
+                        ICA_TARGET, ICTARGET_IDCMP,
+                    End,
+                    CHILD_WeightedWidth, 0,
                 End,
                 LAYOUT_AddChild, HLayoutObject,
+                    LAYOUT_SpaceOuter, TRUE,
                     LAYOUT_AddChild, G.g[G_INPUT] = StringObject,
                         GA_ID, G_INPUT,
                         GA_RelVerify, TRUE,
                         STRINGA_MaxChars, INPUT_MAX,
+                        ICA_TARGET, ICTARGET_IDCMP,   /* every keystroke: @ suggestions */
                     End,
                     LAYOUT_AddChild, G.g[G_SEND] = ButtonObject,
                         GA_ID, G_SEND,
@@ -1373,6 +1737,11 @@ static int open_main(void)
         G.prefs.win_top >= 0 ? WA_Top : TAG_IGNORE, G.prefs.win_top,
         G.prefs.win_left < 0 ? WINDOW_Position : TAG_IGNORE, WPOS_CENTERSCREEN,
         G.menu ? WINDOW_MenuStrip : TAG_IGNORE, (ULONG)G.menu,
+        WA_IDCMP, IDCMP_GADGETDOWN | IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_MENUPICK |
+                  IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW | IDCMP_RAWKEY | IDCMP_VANILLAKEY |
+                  IDCMP_IDCMPUPDATE | IDCMP_EXTENDEDMOUSE | IDCMP_ACTIVEWINDOW | IDCMP_INACTIVEWINDOW,
+        WINDOW_IDCMPHook, (ULONG)&G.idcmp_hook,
+        WINDOW_IDCMPHookBits, IDCMP_IDCMPUPDATE | IDCMP_EXTENDEDMOUSE,
         WINDOW_ParentGroup, (ULONG)root,
     End;
     if (!G.win_obj) {
@@ -1395,10 +1764,6 @@ static void remember_window(void)
 
 static void close_main(void)
 {
-    if (G.win)
-        SetGadgetAttrs((struct Gadget *)G.g[G_ROOMS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
-    if (G.win)
-        SetGadgetAttrs((struct Gadget *)G.g[G_MSGS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
     if (G.win_obj)
         DisposeObject(G.win_obj);
     G.win_obj = NULL;
@@ -1411,6 +1776,7 @@ static void close_main(void)
     if (G.vi)
         FreeVisualInfo(G.vi);
     G.vi = NULL;
+    free_pens();
     close_screen();
 }
 
@@ -1432,6 +1798,7 @@ static void apply_theme(int idx)
             return;
         }
     }
+    G.chat.width = 0;
     rooms_rebuild();
     msgs_rebuild(1);
     update_title();
@@ -1453,6 +1820,9 @@ int gui_run(void)
     ar_strlcpy(G.title, "AmiRocket", sizeof(G.title));
     ar_strlcpy(G.status, "Not connected", sizeof(G.status));
     ar_strlcpy(G.roomhdr, "Not connected", sizeof(G.roomhdr));
+    side_init(&G.side);
+    chat_init(&G.chat);
+    G.dirty_sig = AllocSignal(-1);
 
     if (open_libs() < 0) {
         close_libs();
@@ -1490,7 +1860,10 @@ int gui_run(void)
             GetAttr(WINDOW_SigMask, G.win_obj, &wsig);
         if (G.lwin_obj)
             GetAttr(WINDOW_SigMask, G.lwin_obj, &lsig);
-        sigs = Wait(wsig | lsig | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C);
+        if (G.dirty)
+            redraw_dirty();
+        sigs = Wait(wsig | lsig | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C |
+                    (G.dirty_sig >= 0 ? 1UL << G.dirty_sig : 0));
         if (sigs & SIGBREAKF_CTRL_C)
             G.quit = 1;
         if (sigs & (1UL << G.port->mp_SigBit))
@@ -1509,6 +1882,11 @@ out:
     close_main();
     free_list(&G.room_list);
     free_list(&G.msg_list);
+    side_free(&G.side);
+    chat_free(&G.chat);
+    ar_free(G.members);
+    if (G.dirty_sig >= 0)
+        FreeSignal(G.dirty_sig);
     rc_roomlist_free(&G.rooms);
     rc_msglist_free(&G.msgs);
     if (G.port) {

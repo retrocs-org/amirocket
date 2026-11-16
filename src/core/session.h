@@ -20,6 +20,8 @@ typedef struct {
     char  active_rid[64];
     char  active_type;
     ar_ms active_last;      /* sync cursor for the open room */
+    char  active_topic[256];/* topic of the open room (UTF-8), "" if none */
+    char *active_members;   /* "username\tname\tstatus\n" lines, or NULL */
     int   history_count;    /* messages fetched when a room is opened */
 } RcSession;
 

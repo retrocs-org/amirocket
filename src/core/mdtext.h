@@ -18,4 +18,8 @@
 
 void md_to_plain(Buf *out, const char *utf8);
 
+/* Emoticon for an emoji shortcode without colons ("heart_eyes" -> "<3"),
+ * or NULL when there is none. */
+const char *md_emoticon(const char *code);
+
 #endif

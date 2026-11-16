@@ -256,6 +256,31 @@ static int parse_msg(const JDoc *d, int o, RcMsg *m)
                 m->n_attachments = 1;
         }
     }
+    {   /* "reactions": { ":heart_eyes:": { "usernames": [...] }, ... } */
+        int rx = json_get(d, o, "reactions");
+        if (json_type(d, rx) == JT_OBJECT && json_size(d, rx) > 0) {
+            Buf rb;
+            int i = rx + 1, k;
+            buf_init(&rb);
+            for (k = 0; k < json_size(d, rx); k++) {
+                char code[64];
+                int val = i + 1, users = json_get(d, val, "usernames");
+                if (json_str(d, i, code, sizeof(code)) > 0) {
+                    char *c = code;
+                    size_t l = strlen(c);
+                    if (*c == ':') { c++; l--; }
+                    if (l && c[l - 1] == ':') c[--l] = 0;
+                    if (rb.len)
+                        buf_putc(&rb, '\n');
+                    buf_printf(&rb, "%s %d", c, json_type(d, users) == JT_ARRAY ? json_size(d, users) : 1);
+                }
+                i = d->t[val].next;
+            }
+            if (rb.len)
+                m->reactions = buf_detach(&rb);
+            buf_free(&rb);
+        }
+    }
     if (!m->text || !m->username) {
         rc_msg_free(m);
         return -1;
@@ -622,6 +647,68 @@ int rc_mark_read(RcClient *c, const char *rid)
     return rc;
 }
 
+int rc_room_topic(RcClient *c, const char *rid, char *out, size_t outsz)
+{
+    Buf path;
+    RcResp r;
+    int rc;
+
+    out[0] = 0;
+    buf_init(&path);
+    buf_puts(&path, "/api/v1/rooms.info?roomId=");
+    url_encode(&path, rid);
+    resp_init(&r);
+    rc = rc_call(c, "GET", buf_str(&path), NULL, 1, &r);
+    buf_free(&path);
+    if (rc == RC_OK) {
+        int t = json_path(&r.doc, 0, "room.topic");
+        if (json_type(&r.doc, t) == JT_STRING && json_str(&r.doc, t, out, outsz) < 0)
+            out[0] = 0;   /* longer than the buffer: leave it out */
+    }
+    resp_free(&r);
+    return rc;
+}
+
+int rc_room_members(RcClient *c, const char *rid, char type, int count, char **out)
+{
+    Buf path, res;
+    RcResp r;
+    int rc;
+
+    *out = NULL;
+    buf_init(&path);
+    buf_printf(&path, "/api/v1/%s?roomId=", type == 'p' ? "groups.members" : type == 'd' ? "im.members" : "channels.members");
+    url_encode(&path, rid);
+    buf_printf(&path, "&count=%d", count > 0 ? count : 100);
+    resp_init(&r);
+    rc = rc_call(c, "GET", buf_str(&path), NULL, 1, &r);
+    buf_free(&path);
+    if (rc == RC_OK) {
+        int arr = json_get(&r.doc, 0, "members"), i, k;
+        buf_init(&res);
+        if (json_type(&r.doc, arr) == JT_ARRAY) {
+            for (i = arr + 1, k = 0; k < json_size(&r.doc, arr); k++, i = r.doc.t[i].next) {
+                char u[96], n[96], st[16];
+                if (json_str(&r.doc, json_get(&r.doc, i, "username"), u, sizeof(u)) <= 0)
+                    continue;
+                if (json_str(&r.doc, json_get(&r.doc, i, "name"), n, sizeof(n)) < 0)
+                    n[0] = 0;
+                if (json_str(&r.doc, json_get(&r.doc, i, "status"), st, sizeof(st)) < 0)
+                    st[0] = 0;
+                buf_printf(&res, "%s\t%s\t%s\n", u, n, st);
+            }
+        }
+        if (res.oom) {
+            buf_free(&res);
+            rc = set_err(c, RC_ERR_NOMEM, "Out of memory", NULL);
+        } else {
+            *out = buf_detach(&res);
+        }
+    }
+    resp_free(&r);
+    return rc;
+}
+
 /* ---- model --------------------------------------------------------- */
 
 void rc_room_free(RcRoom *r)
@@ -672,6 +759,7 @@ void rc_msg_free(RcMsg *m)
     ar_free(m->type);
     ar_free(m->tmid);
     ar_free(m->attachment);
+    ar_free(m->reactions);
     memset(m, 0, sizeof(*m));
 }
 

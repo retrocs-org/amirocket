@@ -23,7 +23,11 @@ With **Remember login** ticked, AmiRocket saves the Rocket.Chat user id and auth
 
 The layout follows the Rocket.Chat desktop client. On the left, rooms are grouped into collapsible **Favorites**, **Channels** and **Direct messages** sections (`#` public channel, `*` private group, `@` direct message, unread count in brackets). On the right, a header shows the open room. Messages are grouped under a "name time" line per sender, with a separator for each day. New messages in the open room arrive within the poll interval, 5 seconds by default (`interval=` in the prefs file). Messages that mention you are highlighted.
 
-**Settings → Theme** switches the colours: Workbench (default, the system colours), Catppuccin Latte, Frappé, Macchiato and Mocha, Nord, Dracula, Gruvbox Dark, Solarized Light and Kickstart 1.3. Any theme other than Workbench opens AmiRocket on its own public screen, `AMIROCKET`, with the same resolution and font as Workbench. It has the theme's palette and pens, so gadgets, frames, title bars and menus are all themed. Switch screens with Amiga+M or the screen depth gadget. The choice is saved as `theme=` in the prefs file.
+The room list, room header (`# general * topic`) and message view are drawn by AmiRocket itself, in the style of the desktop client. Each sender's messages are grouped under an avatar block with their initial, a **bold** name and a dim time. Reactions show as pills (`<3 1`) and days are separated by Today/Yesterday lines. Scroll with the scrollers or the mouse wheel.
+
+Typing `@` in the input line opens a **People** list with recent senders first, then the room's members and `@here`/`@all`, filtered as you type. Return or Tab inserts the top match, and clicking inserts any of them.
+
+**Settings → Theme** switches the colours: Workbench (default, the system colours), Catppuccin Latte, Frappé, Macchiato and Mocha, Nord, Dracula, Gruvbox Dark, Solarized Light and Kickstart 1.3. By default AmiRocket stays in a window on Workbench and reserves the theme's colours as shared pens. That is exact on 256-colour or RTG Workbenches and the nearest available colours on 8- or 16-colour ones. With **Settings → Theme on its own screen**, AmiRocket opens on its own public screen, `AMIROCKET`, with the same resolution and font as Workbench. The theme's palette and pens are then used everywhere, including frames, title bars and menus; switch screens with Amiga+M. The choices are saved as `theme=` and `ownscreen=` in the prefs file.
 
 Message markup is shown as plain text: `*bold*`, `_italic_` and code fences lose their markers, links become "text (url)", and common `:emoji:` codes become emoticons. AmigaOS 3.2's listbrowser cannot mix text styles in one line.
 
@@ -104,6 +108,7 @@ src/amiga/
   mem_amiga.c    semaphore-protected exec memory pool
   prefs.c        ENV:/ENVARC:AmiRocket.prefs
   theme.c        colour themes (palette + DrawInfo pens for the AMIROCKET screen)
+  view.c         custom-drawn sidebar, room header and message view
 src/posix/       sockets + OpenSSL transport for rcli and tests
 ```
 

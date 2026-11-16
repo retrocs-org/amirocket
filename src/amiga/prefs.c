@@ -34,6 +34,7 @@ static void set_kv(Prefs *p, const char *k, const char *v)
     else if (!strcmp(k, "remember")) p->remember = atoi(v) != 0;
     else if (!strcmp(k, "interval")) p->interval = atoi(v);
     else if (!strcmp(k, "theme")) ar_strlcpy(p->theme, v, sizeof(p->theme));
+    else if (!strcmp(k, "ownscreen")) p->ownscreen = atoi(v) != 0;
     else if (!strcmp(k, "window")) {
         sscanf(v, "%d,%d,%d,%d", &p->win_left, &p->win_top, &p->win_width, &p->win_height);
     }
@@ -96,7 +97,7 @@ int prefs_save(const Prefs *p)
     buf_printf(&b, "server=%s\nuser=%s\nverify=%d\nremember=%d\ninterval=%d\n",
                p->server, p->user, p->verify, p->remember, p->interval);
     buf_printf(&b, "window=%d,%d,%d,%d\n", p->win_left, p->win_top, p->win_width, p->win_height);
-    buf_printf(&b, "theme=%s\n", p->theme);
+    buf_printf(&b, "theme=%s\nownscreen=%d\n", p->theme, p->ownscreen);
     if (p->remember && p->token[0])
         buf_printf(&b, "user_id=%s\ntoken=%s\n", p->user_id, p->token);
     rc = write_file("ENV:" PREFS_NAME, &b);

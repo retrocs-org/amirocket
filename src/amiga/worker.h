@@ -54,6 +54,8 @@ typedef struct NetMsg {
     char  token[128];
     char  server_version[32];
     char  totp_method[16];
+    char  topic[256];           /* NC_OPEN_ROOM: room topic, UTF-8 */
+    char *members;              /* NC_OPEN_ROOM: "username\tname\tstatus\n" lines */
     ar_ms server_now;           /* server clock from the last HTTP Date header */
     ar_ms sent_at;              /* GUI-side bookkeeping */
 } NetMsg;

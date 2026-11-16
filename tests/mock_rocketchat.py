@@ -89,7 +89,8 @@ def seed():
     for i in range(30):
         g.append(make_msg("GENERAL", "alice" if i % 2 else "tommy", "general message %d" % i, T0 + 2000 + i * 1000))
     g.append(make_msg("GENERAL", "alice", "Hej på dig ’quoted’ “double” – café \U0001F600 €5", T0 + 40000))
-    g.append(make_msg("GENERAL", "alice", "line one\nline two", T0 + 41000))
+    g.append(make_msg("GENERAL", "alice", "line one\nline two", T0 + 41000,
+                      reactions={":heart_eyes:": {"usernames": ["tommy"]}, ":+1:": {"usernames": ["tommy", "alice"]}}))
     g.append(make_msg("GENERAL", "alice", "", T0 + 42000,
                       attachments=[{"title": "screenshot.png", "image_url": "/file-upload/x/screenshot.png"}],
                       file={"_id": "f1", "name": "screenshot.png", "type": "image/png"}))
@@ -218,6 +219,24 @@ class Handler(BaseHTTPRequestHandler):
                     lt = parse_iso(q["latest"])
                     msgs = [m for m in msgs if parse_iso(m["ts"]) < lt]
                 return self.send_json(200, {"messages": msgs[:count], "success": True}, chunked=self.server.chunked)
+        for ep, t in (("channels.members", "c"), ("groups.members", "p"), ("im.members", "d")):
+            if p == "/api/v1/" + ep:
+                rid = q.get("roomId")
+                if rid not in ROOMS or ROOMS[rid]["t"] != t:
+                    return self.fail(400, "error-room-not-found", "Room not found")
+                mem = [{"_id": u["_id"], "username": u["username"], "name": u["name"],
+                        "status": "online" if u["username"] == "alice" else "offline"}
+                       for u in USERS.values()]
+                return self.send_json(200, {"members": mem, "count": len(mem), "offset": 0,
+                                            "total": len(mem), "success": True})
+        if p == "/api/v1/rooms.info":
+            rid = q.get("roomId")
+            if rid not in ROOMS:
+                return self.fail(400, "error-room-not-found", "The required \"roomId\" or \"roomName\" param provided does not match any channel")
+            room = {"_id": rid, "t": ROOMS[rid]["t"], "name": ROOMS[rid]["name"]}
+            if rid == "GENERAL":
+                room["topic"] = "Gammal skol-PC topic \u2013 v\u00e4lkommen"
+            return self.send_json(200, {"room": room, "success": True})
         if p == "/api/v1/chat.syncMessages":
             rid = q.get("roomId")
             if rid not in ROOMS:

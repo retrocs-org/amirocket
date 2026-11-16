@@ -18,6 +18,7 @@ typedef struct {
     int  remember;
     int  interval;      /* poll interval in seconds */
     char theme[24];     /* theme id, see theme.c */
+    int  ownscreen;     /* themes on their own screen instead of a Workbench window */
     int  win_left, win_top, win_width, win_height;
 } Prefs;
 

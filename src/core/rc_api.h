@@ -65,6 +65,7 @@ typedef struct {
     char *type;           /* system message type ("uj", "ul", ...) or NULL */
     char *tmid;           /* thread parent id, or NULL */
     char *attachment;     /* first attachment title / file name, or NULL */
+    char *reactions;      /* "heart_eyes 1\n+1 2" (shortcode count per line), or NULL */
     int   n_attachments;
     int   edited;
     ar_ms ts_ms;
@@ -107,6 +108,9 @@ int rc_history(RcClient *c, const char *rid, char type, int count, ar_ms before,
 int rc_sync(RcClient *c, const char *rid, ar_ms last_update, RcMsgList *out);
 int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo);
 int rc_mark_read(RcClient *c, const char *rid);
+int rc_room_topic(RcClient *c, const char *rid, char *out, size_t outsz);  /* "" if none */
+/* Room members as lines "username\tname\tstatus" (UTF-8, ar_malloc'd). */
+int rc_room_members(RcClient *c, const char *rid, char type, int count, char **out);
 
 /* Data model helpers */
 void rc_room_free(RcRoom *r);

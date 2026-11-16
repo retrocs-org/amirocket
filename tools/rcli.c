@@ -75,6 +75,13 @@ static void print_msg(const RcMsg *m)
         printf(" (edited)");
     if (m->tmid)
         printf(" (thread)");
+    if (m->reactions) {
+        const char *p;
+        printf(" [reactions:");
+        for (p = m->reactions; *p; p++)
+            putchar(*p == '\n' ? ',' : *p);
+        printf("]");
+    }
     printf("\n");
 }
 
@@ -168,6 +175,13 @@ int main(int argc, char **argv)
         if (rc != RC_OK) {
             ret = fail(&s, rc);
             goto done;
+        }
+        if (s.active_topic[0])
+            printf("topic: %s\n", s.active_topic);
+        if (s.active_members && getenv("RCLI_MEMBERS")) {
+            char *p;
+            for (p = s.active_members; *p; p++)
+                putchar(*p == '\t' ? '|' : *p);
         }
         for (i = 0; i < msgs.count; i++)
             print_msg(&msgs.items[i]);

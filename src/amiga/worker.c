@@ -67,6 +67,7 @@ void netmsg_free(NetMsg *m)
     wipe_free(m->a_token);
     ar_free(m->a_rid);
     ar_free(m->a_text);
+    ar_free(m->members);
     memset(m->token, 0, sizeof(m->token));
     ar_free(m);
 }
@@ -232,6 +233,8 @@ static void handle(Worker *w, NetMsg *m)
         }
         ar_strlcpy(m->rid, m->a_rid ? m->a_rid : "", sizeof(m->rid));
         m->rc = sess_open_room(&w->sess, m->rid, &m->msgs);
+        ar_strlcpy(m->topic, w->sess.active_topic, sizeof(m->topic));
+        m->members = w->sess.active_members ? ar_strdup(w->sess.active_members) : NULL;
         if (m->rc != RC_OK)
             ar_strlcpy(m->text, m->rc == RC_ERR_ARGS ? "Unknown room" : rc_error(&w->sess.rc), sizeof(m->text));
         break;

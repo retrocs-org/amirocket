@@ -18,8 +18,20 @@ static const struct { const char *code, *text; } shortcodes[] = {
     { "eyes", "(eyes)" }, { "shrug", "(shrug)" }, { "facepalm", "(facepalm)" },
     { "white_check_mark", "(v)" }, { "heavy_check_mark", "v" }, { "x", "x" },
     { "rolling_eyes", "(rolleyes)" }, { "upside_down", "(:" }, { "poop", "(poo)" },
+    { "champagne_glass", "(cheers)" }, { "clinking_glass", "(cheers)" }, { "beers", "(cheers)" },
+    { "beer", "(beer)" }, { "coffee", "(coffee)" }, { "partying_face", "\\o/" },
+    { "100", "(100)" }, { "star", "*" }, { "star_struck", "*_*" }, { "hugging", "(hug)" },
     { NULL, NULL }
 };
+
+const char *md_emoticon(const char *code)
+{
+    int k;
+    for (k = 0; shortcodes[k].code; k++)
+        if (!strcmp(shortcodes[k].code, code))
+            return shortcodes[k].text;
+    return NULL;
+}
 
 static int is_word(unsigned char c)
 {

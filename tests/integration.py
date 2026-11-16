@@ -66,6 +66,8 @@ def entries(out):
     """Messages in rcli output (continuation lines of multi-line texts folded)."""
     res = []
     for line in out.splitlines():
+        if line.startswith("topic: "):
+            continue
         if len(line) > 24 and line[:2] == "20" and line[10] == "T":
             res.append(line)
         elif res:
@@ -112,6 +114,8 @@ def test_basic():
         check(ts == sorted(ts), "history oldest first", out)
         check("Hej p\u00c3\u00a5 dig \u00e2\u0080\u0099quoted" in out, "UTF-8 text intact", out)
         check("line one\nline two" in out, "multiline text", out)
+        check("[reactions:heart_eyes 1,+1 2]" in out, "reactions parsed", out)
+        check("topic: Gammal skol-PC topic" in out, "room topic from rooms.info", out)
         check("[attachment: screenshot.png]" in out, "attachment title", out)
         check("edited text (edited)" in out, "edited flag", out)
         check("reply in thread (thread)" in out, "thread flag", out)
@@ -123,6 +127,8 @@ def test_basic():
         rc, out, err = rcli(*login_args(m), "history", "general", "50")
         check(rc == 0 and "* joined the room" in out, "system message text", out)
 
+        rc, out, err = rcli(*login_args(m), "history", "general", "1", env={"RCLI_MEMBERS": "1"})
+        check("alice|Alice|online" in out and "tommy|Tommy F|offline" in out, "room members", out + err)
         rc, out, err = rcli(*login_args(m), "history", "Amiga Dev")
         check(rc == 0 and "AmiSSL works on 68020" in out, "private group history via fname", out + err)
         rc, out, err = rcli(*login_args(m), "history", "@alice")

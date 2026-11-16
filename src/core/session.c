@@ -17,6 +17,8 @@ int sess_init(RcSession *s, const NetIface *net, const char *url, int verify_tls
 
 void sess_cleanup(RcSession *s)
 {
+    ar_free(s->active_members);
+    s->active_members = NULL;
     rc_roomlist_free(&s->rooms);
     rc_cleanup(&s->rc);
     s->logged_in = 0;
@@ -91,6 +93,13 @@ int sess_open_room(RcSession *s, const char *rid, RcMsgList *out)
     rc_msglist_free(&hist);
     if (r->unread || r->alert)
         rc_mark_read(&s->rc, s->active_rid);   /* best effort */
+    if (r->type != 'd')
+        rc_room_topic(&s->rc, s->active_rid, s->active_topic, sizeof(s->active_topic));
+    else
+        s->active_topic[0] = 0;
+    ar_free(s->active_members);
+    s->active_members = NULL;
+    rc_room_members(&s->rc, s->active_rid, s->active_type, 200, &s->active_members);  /* best effort */
     return RC_OK;
 }
 
