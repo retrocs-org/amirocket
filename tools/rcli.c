@@ -80,8 +80,8 @@ static void print_msg(const RcMsg *m)
 
 static void print_room(const RcRoom *r)
 {
-    printf("%c %-24s %-20s unread=%d%s%s rid=%s\n", r->type, r->name, r->fname ? r->fname : "",
-           r->unread, r->alert ? " alert" : "", r->favorite ? " fav" : "", r->rid);
+    printf("%c %-24s %-20s unread=%d%s%s%s rid=%s\n", r->type, r->name, r->fname ? r->fname : "",
+           r->unread, r->alert ? " alert" : "", r->favorite ? " fav" : "", r->open ? "" : " hidden", r->rid);
 }
 
 static int fail(RcSession *s, int rc)

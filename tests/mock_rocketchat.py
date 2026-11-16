@@ -80,6 +80,8 @@ def seed():
             SUBS[rid]["fname"] = r["fname"]
         if rid == "GENERAL":
             SUBS[rid]["f"] = True
+        if rid == "atroom":
+            SUBS[rid]["open"] = False      # hidden by the user
         MESSAGES[rid] = []
         DELETED[rid] = []
     g = MESSAGES["GENERAL"]

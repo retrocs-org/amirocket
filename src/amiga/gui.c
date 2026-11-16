@@ -343,9 +343,15 @@ static void rooms_rebuild(void)
     buf_init(&b);
     for (s = 0; order && s < SEC_N; s++) {
         int cnt = 0;
-        for (i = 0; i < G.rooms.count; i++)
-            if (room_section(&G.rooms.items[i]) == s)
+        for (i = 0; i < G.rooms.count; i++) {
+            const RcRoom *r = &G.rooms.items[i];
+            /* rooms hidden in Rocket.Chat ("open": false) stay hidden, unless
+             * open here; the server re-opens them when a message arrives */
+            if (!r->open && strcmp(r->rid, G.cur_rid) != 0)
+                continue;
+            if (room_section(r) == s)
                 order[cnt++] = i;
+        }
         if (!cnt)
             continue;
         g_sort_rooms = &G.rooms;

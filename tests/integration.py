@@ -103,6 +103,7 @@ def test_basic():
               "rooms sorted: channels by title ignoring punctuation, then DMs", out)
         check("unread=1 alert" in lines[4], "DM unread/alert parsed", out)
         check(" fav " in lines[2] and " fav " not in lines[0], "favourite flag parsed", out)
+        check(" hidden " in lines[3] and " hidden " not in lines[2], "hidden (open:false) flag parsed", out)
 
         rc, out, err = rcli(*login_args(m), "history", "general", "20")
         lines = entries(out)
