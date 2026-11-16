@@ -23,6 +23,8 @@ With **Remember login** ticked, AmiRocket saves the Rocket.Chat user id and auth
 
 The layout follows the Rocket.Chat desktop client. On the left, rooms are grouped into collapsible **Favorites**, **Channels** and **Direct messages** sections (`#` public channel, `*` private group, `@` direct message, unread count in brackets). On the right, a header shows the open room. Messages are grouped under a "name time" line per sender, with a separator for each day. New messages in the open room arrive within the poll interval, 5 seconds by default (`interval=` in the prefs file). Messages that mention you are highlighted.
 
+**Settings → Theme** switches the colours: Workbench (default, the system colours), Catppuccin Latte, Frappé, Macchiato and Mocha, Nord, Dracula, Gruvbox Dark, Solarized Light and Kickstart 1.3. Any theme other than Workbench opens AmiRocket on its own public screen, `AMIROCKET`, with the same resolution and font as Workbench. It has the theme's palette and pens, so gadgets, frames, title bars and menus are all themed. Switch screens with Amiga+M or the screen depth gadget. The choice is saved as `theme=` in the prefs file.
+
 Message markup is shown as plain text: `*bold*`, `_italic_` and code fences lose their markers, links become "text (url)", and common `:emoji:` codes become emoticons. AmigaOS 3.2's listbrowser cannot mix text styles in one line.
 
 Text is converted between UTF-8 and the Amiga's ISO-8859-1. Typographic quotes and dashes become ASCII, and common emoji become emoticons (`🙂` → `:)`, `👍` → `(y)`). Anything else shows as `?`.
@@ -101,6 +103,7 @@ src/amiga/
   net_amiga.c    bsdsocket.library + AmiSSL transport
   mem_amiga.c    semaphore-protected exec memory pool
   prefs.c        ENV:/ENVARC:AmiRocket.prefs
+  theme.c        colour themes (palette + DrawInfo pens for the AMIROCKET screen)
 src/posix/       sockets + OpenSSL transport for rcli and tests
 ```
 

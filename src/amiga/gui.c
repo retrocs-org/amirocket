@@ -13,6 +13,7 @@
  */
 #include "gui.h"
 #include "prefs.h"
+#include "theme.h"
 #include "worker.h"
 #include "../core/charset.h"
 #include "../core/mdtext.h"
@@ -28,6 +29,7 @@
 #include <intuition/icclass.h>
 #include <libraries/gadtools.h>
 #include <graphics/gfxbase.h>
+#include <graphics/gfx.h>
 #include <libraries/locale.h>
 
 #include <classes/window.h>
@@ -76,7 +78,7 @@ enum {
     G_COUNT
 };
 
-enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH };
+enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH, M_THEME_BASE = 100 };
 
 static struct NewMenu g_newmenu[] = {
     { NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL },
@@ -89,8 +91,12 @@ static struct NewMenu g_newmenu[] = {
     { NM_ITEM, (STRPTR)"Quit", (STRPTR)"Q", 0, 0, (APTR)M_QUIT },
     { NM_TITLE, (STRPTR)"Room", NULL, 0, 0, NULL },
     { NM_ITEM, (STRPTR)"Check for new messages", (STRPTR)"R", 0, 0, (APTR)M_REFRESH },
+    { NM_TITLE, (STRPTR)"Settings", NULL, 0, 0, NULL },
+    { NM_ITEM, (STRPTR)"Theme", NULL, 0, 0, NULL },
+    /* theme sub-items are appended at run time */
     { NM_END, NULL, NULL, 0, 0, NULL }
 };
+#define BASE_MENU_ITEMS ((int)(sizeof(g_newmenu) / sizeof(g_newmenu[0])) - 1)
 
 enum { SEC_FAV, SEC_CHAN, SEC_DM, SEC_N };
 static const char *g_sec_names[SEC_N] = { "Favorites", "Channels", "Direct messages" };
@@ -99,6 +105,9 @@ static const char *g_sec_names[SEC_N] = { "Favorites", "Channels", "Direct messa
 
 typedef struct {
     struct Screen *scr;
+    int own_screen;            /* scr is AmiRocket's themed screen */
+    ULONG colors32[2 + 3 * TC_COUNT];
+    struct NewMenu *newmenu;
     APTR vi;
     struct Menu *menu;
     UWORD hipen, fillpen;
@@ -1042,8 +1051,12 @@ static void about(void)
     request("About AmiRocket", G.about);
 }
 
+static void apply_theme(int idx);
+
 static void handle_menu(UWORD code)
 {
+    int theme = -1;
+
     while (code != MENUNULL) {
         struct MenuItem *item = ItemAddress(G.menu, code);
         if (!item)
@@ -1059,9 +1072,16 @@ static void handle_menu(UWORD code)
         case M_ABOUT:      about(); break;
         case M_QUIT:       G.quit = 1; break;
         case M_REFRESH:    if (G.connected) cmd_simple(NC_POLL_NOW); break;
+        default:
+            if ((ULONG)GTMENUITEM_USERDATA(item) >= M_THEME_BASE)
+                theme = (int)((ULONG)GTMENUITEM_USERDATA(item) - M_THEME_BASE);
+            break;
         }
         code = item->NextSelect;
     }
+    /* after the loop: switching themes frees the menu strip */
+    if (theme >= 0 && theme != theme_find(G.prefs.theme))
+        apply_theme(theme);
 }
 
 static void handle_main(void)
@@ -1181,14 +1201,95 @@ static void close_libs(void)
         }
 }
 
+/* Opens the themed screen (or locks Workbench for the "workbench" theme). */
+static int open_screen(void)
+{
+    const Theme *t = theme_get(theme_find(G.prefs.theme));
+
+    G.own_screen = 0;
+    if (!t->workbench) {
+        struct Screen *wb = LockPubScreen((CONST_STRPTR)"Workbench");
+        ULONG depth = 4;
+        if (wb) {
+            depth = GetBitMapAttr(wb->RastPort.BitMap, BMA_DEPTH);
+            UnlockPubScreen(NULL, wb);
+        }
+        /* 16 theme colours need depth 4; RTG truecolour gets an 8-bit screen */
+        depth = depth > 8 ? 8 : depth < 4 ? 4 : depth;
+        theme_colors32(t, G.colors32);
+        G.scr = OpenScreenTags(NULL,
+                               SA_LikeWorkbench, TRUE,
+                               SA_Depth, depth,
+                               SA_Title, (ULONG)"AmiRocket " AR_VERSION,
+                               SA_PubName, (ULONG)"AMIROCKET",
+                               SA_Pens, (ULONG)theme_pens(),
+                               SA_Colors32, (ULONG)G.colors32,
+                               SA_SharePens, TRUE,
+                               SA_Interleaved, TRUE,
+                               SA_ShowTitle, TRUE,
+                               TAG_END);
+        if (G.scr) {
+            PubScreenStatus(G.scr, 0);   /* make it public for requesters */
+            G.own_screen = 1;
+            return 0;
+        }
+        /* not enough memory or no such mode: fall back to Workbench */
+        ar_strlcpy(G.status, "Could not open the theme screen; using Workbench", sizeof(G.status));
+    }
+    G.scr = LockPubScreen(NULL);
+    return G.scr ? 0 : -1;
+}
+
+static void close_screen(void)
+{
+    if (!G.scr)
+        return;
+    if (G.own_screen) {
+        PubScreenStatus(G.scr, PSNF_PRIVATE);
+        while (!CloseScreen(G.scr)) {
+            /* another program has a window on our screen */
+            struct EasyStruct es = { sizeof(struct EasyStruct), 0, (STRPTR)"AmiRocket",
+                                     (STRPTR)"Please close the other windows on the AmiRocket screen.",
+                                     (STRPTR)"Retry" };
+            EasyRequest(NULL, &es, NULL, TAG_END);
+        }
+    } else {
+        UnlockPubScreen(NULL, G.scr);
+    }
+    G.scr = NULL;
+    G.own_screen = 0;
+}
+
+static void build_menu(void)
+{
+    int n = theme_count(), cur = theme_find(G.prefs.theme), i, k;
+    LONG all = (1L << n) - 1;
+
+    G.newmenu = (struct NewMenu *)ar_calloc((size_t)(BASE_MENU_ITEMS + n + 1), sizeof(struct NewMenu));
+    if (!G.newmenu)
+        return;
+    memcpy(G.newmenu, g_newmenu, sizeof(struct NewMenu) * (size_t)BASE_MENU_ITEMS);
+    for (i = 0, k = BASE_MENU_ITEMS; i < n; i++, k++) {
+        const Theme *t = theme_get(i);
+        G.newmenu[k].nm_Type = NM_SUB;
+        G.newmenu[k].nm_Label = (STRPTR)t->name;
+        G.newmenu[k].nm_Flags = CHECKIT | (i == cur ? CHECKED : 0);
+        G.newmenu[k].nm_MutualExclude = all & ~(1L << i);
+        G.newmenu[k].nm_UserData = (APTR)(ULONG)(M_THEME_BASE + i);
+    }
+    G.newmenu[k].nm_Type = NM_END;
+    G.menu = CreateMenus(G.newmenu, GTMN_FrontPen, 0, TAG_END);
+    if (G.menu && G.vi)
+        LayoutMenus(G.menu, G.vi, GTMN_NewLookMenus, TRUE, TAG_END);
+}
+
 static int open_main(void)
 {
     Object *root;
     struct DrawInfo *dri;
     ULONG minside;
 
-    G.scr = LockPubScreen(NULL);
-    if (!G.scr)
+    if (open_screen() < 0)
         return -1;
     dri = GetScreenDrawInfo(G.scr);
     G.hipen = dri ? dri->dri_Pens[HIGHLIGHTTEXTPEN] : 2;
@@ -1198,9 +1299,7 @@ static int open_main(void)
     /* room list wide enough for about 22 characters of the screen font */
     minside = (ULONG)(G.scr->RastPort.Font ? G.scr->RastPort.Font->tf_XSize : 8) * 22;
     G.vi = GetVisualInfo(G.scr, TAG_END);
-    G.menu = CreateMenus(g_newmenu, GTMN_FrontPen, 0, TAG_END);
-    if (G.menu && G.vi)
-        LayoutMenus(G.menu, G.vi, GTMN_NewLookMenus, TRUE, TAG_END);
+    build_menu();
 
     root = G.g[0] = VLayoutObject,
         LAYOUT_SpaceOuter, TRUE,
@@ -1294,6 +1393,53 @@ static void remember_window(void)
     G.prefs.win_height = G.win->Height;
 }
 
+static void close_main(void)
+{
+    if (G.win)
+        SetGadgetAttrs((struct Gadget *)G.g[G_ROOMS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
+    if (G.win)
+        SetGadgetAttrs((struct Gadget *)G.g[G_MSGS], G.win, NULL, LISTBROWSER_Labels, ~0, TAG_END);
+    if (G.win_obj)
+        DisposeObject(G.win_obj);
+    G.win_obj = NULL;
+    G.win = NULL;
+    if (G.menu)
+        FreeMenus(G.menu);
+    G.menu = NULL;
+    ar_free(G.newmenu);
+    G.newmenu = NULL;
+    if (G.vi)
+        FreeVisualInfo(G.vi);
+    G.vi = NULL;
+    close_screen();
+}
+
+/* Switches theme: closes the windows and screen and opens them again. */
+static void apply_theme(int idx)
+{
+    int had_login = G.lwin_obj != NULL;
+
+    ar_strlcpy(G.prefs.theme, theme_get(idx)->id, sizeof(G.prefs.theme));
+    remember_window();
+    prefs_save(&G.prefs);
+    login_close();
+    close_main();
+    if (open_main() < 0) {
+        /* last resort: back to Workbench */
+        ar_strlcpy(G.prefs.theme, "workbench", sizeof(G.prefs.theme));
+        if (open_main() < 0) {
+            G.quit = 1;
+            return;
+        }
+    }
+    rooms_rebuild();
+    msgs_rebuild(1);
+    update_title();
+    set_status(G.status);
+    if (had_login)
+        login_open(NULL);
+}
+
 int gui_run(void)
 {
     char err[128];
@@ -1340,7 +1486,8 @@ int gui_run(void)
 
     while (!G.quit) {
         ULONG wsig = 0, lsig = 0, sigs;
-        GetAttr(WINDOW_SigMask, G.win_obj, &wsig);
+        if (G.win_obj)
+            GetAttr(WINDOW_SigMask, G.win_obj, &wsig);
         if (G.lwin_obj)
             GetAttr(WINDOW_SigMask, G.lwin_obj, &lsig);
         sigs = Wait(wsig | lsig | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C);
@@ -1348,7 +1495,7 @@ int gui_run(void)
             G.quit = 1;
         if (sigs & (1UL << G.port->mp_SigBit))
             handle_port();
-        if (sigs & wsig)
+        if (wsig && (sigs & wsig))
             handle_main();
         if (G.lwin_obj && (sigs & lsig))
             handle_login();
@@ -1359,16 +1506,9 @@ int gui_run(void)
 out:
     worker_stop();
     login_close();
-    if (G.win_obj)
-        DisposeObject(G.win_obj);
+    close_main();
     free_list(&G.room_list);
     free_list(&G.msg_list);
-    if (G.menu)
-        FreeMenus(G.menu);
-    if (G.vi)
-        FreeVisualInfo(G.vi);
-    if (G.scr)
-        UnlockPubScreen(NULL, G.scr);
     rc_roomlist_free(&G.rooms);
     rc_msglist_free(&G.msgs);
     if (G.port) {

@@ -17,6 +17,7 @@ typedef struct {
     int  verify;        /* verify TLS certificates */
     int  remember;
     int  interval;      /* poll interval in seconds */
+    char theme[24];     /* theme id, see theme.c */
     int  win_left, win_top, win_width, win_height;
 } Prefs;
 
