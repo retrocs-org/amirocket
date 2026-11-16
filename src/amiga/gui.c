@@ -153,7 +153,7 @@ typedef struct {
     int      chat_relayout;
     char     topic[256];       /* UTF-8 */
     char    *members;          /* open room: "username\tname\tstatus\n" lines (UTF-8) */
-    struct { char user[96]; char name[96]; int online; int recent; int emoji; } sugg[MAX_SUGG];
+    struct { char user[96]; char name[96]; int online; int recent; int emoji; char ins[100]; } sugg[MAX_SUGG];
     int      sugg_kind;        /* 0 people (@), 1 emoji (:) */
     int      n_sugg;
     int      sugg_at, sugg_end;  /* '@' position and cursor in the input text */
@@ -597,6 +597,42 @@ static void redraw_dirty(void);
 static void on_side_click(void);
 static void on_chat_click(void);
 
+static int is_name_char(unsigned char c);
+
+/* Runs inside the edit hook: replaces the "@pre" word before the cursor in
+ * the work buffer with the selected suggestion (already Latin-1, with a
+ * trailing space) and puts the cursor after it. */
+static int hook_complete(struct SGWork *sgw)
+{
+    char *wb = (char *)sgw->WorkBuffer;
+    const char *ins;
+    int pos, at, n, il, tail, max;
+
+    if (!wb || G.sugg_sel < 0 || G.sugg_sel >= G.n_sugg)
+        return 0;
+    ins = G.sugg[G.sugg_sel].ins;
+    il = (int)strlen(ins);
+    n = sgw->NumChars;
+    pos = sgw->BufferPos > n ? n : sgw->BufferPos;
+    at = pos;
+    while (at > 0 && is_name_char((unsigned char)wb[at - 1]))
+        at--;
+    if (at == 0 || (wb[at - 1] != '@' && wb[at - 1] != ':') || !il)
+        return 0;
+    at--;                          /* include the '@' or ':' */
+    tail = n - pos;
+    max = (sgw->StringInfo ? sgw->StringInfo->MaxChars : INPUT_MAX + 1) - 1;
+    if (at + il + tail > max)
+        return 0;
+    memmove(wb + at + il, wb + pos, (size_t)tail);
+    memcpy(wb + at, ins, (size_t)il);
+    sgw->NumChars = at + il + tail;
+    wb[sgw->NumChars] = 0;
+    sgw->BufferPos = at + il;
+    sgw->EditOp = EO_BIGCHANGE;
+    return 1;
+}
+
 /* String edit hook on the input line. Intuition calls it for every key
  * (in input.device's context), after its own editing: only note what
  * happened and wake the main loop, which reads the text itself. */
@@ -618,14 +654,31 @@ static ULONG edit_hook_func(struct Hook *h, struct SGWork *sgw, ULONG *msg)
     }
     if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY)
         G.last_key = sgw->IEvent->ie_Code;
-    if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY && G.n_sugg) {
-        UWORD code = sgw->IEvent->ie_Code & ~IECODE_UP_PREFIX;
-        if (code == 0x4C)            /* cursor up */
-            G.sugg_move--;
-        else if (code == 0x4D)       /* cursor down */
-            G.sugg_move++;
-        else if (code == 0x45)       /* Esc */
+    if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY && G.n_sugg &&
+        !(sgw->IEvent->ie_Code & IECODE_UP_PREFIX)) {
+        UWORD code = sgw->IEvent->ie_Code;
+        int n = G.n_sugg;
+        if (code == 0x4C || code == 0x4D) {          /* cursor up / down */
+            G.sugg_sel = (G.sugg_sel + (code == 0x4C ? n - 1 : 1)) % n;
+            sgw->Actions &= ~(SGA_END | SGA_BEEP);
+        } else if (code == 0x45) {                   /* Esc */
             G.sugg_close = 1;
+            sgw->Actions &= ~(SGA_END | SGA_BEEP);
+        } else if (code == 0x44 || code == 0x43 || code == 0x42) {  /* Return, Enter, Tab */
+            /* insert the name right here, so the field stays active with
+             * the cursor after "@name " instead of ending and coming back */
+            if (hook_complete(sgw))
+                sgw->Actions = (sgw->Actions & ~(SGA_END | SGA_BEEP | SGA_NEXTACTIVE | SGA_PREVACTIVE)) |
+                               SGA_USE | SGA_REDISPLAY;
+            G.n_sugg = 0;
+            G.sugg_close = 1;
+        }
+        if (sgw->WorkBuffer) {
+            int k = sgw->NumChars < 0 ? 0 : sgw->NumChars > INPUT_MAX ? INPUT_MAX : sgw->NumChars;
+            memcpy(G.hook_buf, sgw->WorkBuffer, (size_t)k);
+            G.hook_buf[k] = 0;
+            G.hook_pos = sgw->BufferPos > k ? k : sgw->BufferPos;
+        }
     }
     G.input_changed = 1;
     if (G.dirty_sig >= 0)
@@ -644,15 +697,11 @@ static void input_events(void)
         return;
     }
     if (G.input_changed) {
-        int move = G.sugg_move;
         G.input_changed = 0;
         G.sugg_move = 0;
-        if (move && G.n_sugg) {
-            G.sugg_sel = (G.sugg_sel + move % G.n_sugg + G.n_sugg) % G.n_sugg;
-            mark_dirty(DIRTY_CHAT);
-        } else {
-            update_suggestions();
-        }
+        update_suggestions();
+        if (G.n_sugg)
+            mark_dirty(DIRTY_CHAT);   /* the hook may have moved the selection */
     }
 }
 
@@ -792,6 +841,22 @@ static void add_sugg(const char *user, const char *name, int online, int recent,
     G.n_sugg++;
 }
 
+/* What Return inserts for each suggestion, ready in Latin-1 for the edit
+ * hook (which runs in input.device and must not allocate). */
+static void fill_ins(void)
+{
+    int k;
+    Buf u;
+
+    buf_init(&u);
+    for (k = 0; k < G.n_sugg; k++) {
+        buf_clear(&u);
+        utf8_to_latin1(&u, G.sugg[k].user, 0);
+        snprintf(G.sugg[k].ins, sizeof(G.sugg[0].ins), G.sugg_kind == 1 ? ":%s: " : "@%s ", buf_str(&u));
+    }
+    buf_free(&u);
+}
+
 static void hide_suggestions(void)
 {
     if (G.n_sugg) {
@@ -847,6 +912,7 @@ static void update_suggestions(void)
         }
         if (G.sugg_sel >= G.n_sugg || G.n_sugg != old)
             G.sugg_sel = 0;
+        fill_ins();
         if (G.n_sugg || old)
             mark_dirty(DIRTY_CHAT);
         return;
@@ -900,6 +966,7 @@ static void update_suggestions(void)
         G.sugg_sel = 0;
     if (G.n_sugg != old)
         G.sugg_sel = 0;
+    fill_ins();
     if (G.n_sugg || old)
         mark_dirty(DIRTY_CHAT);
 }
@@ -943,6 +1010,10 @@ static void complete_suggestion(int i)
     buf_free(&u);
     hide_suggestions();
     ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
+    /* activating may mark the whole text on OS 3.2; setting the cursor
+     * again drops the mark and leaves it after "@name " */
+    SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL,
+                   STRINGA_BufferPos, (ULONG)G.hook_pos, TAG_END);
 }
 
 static void on_chat_click(void)
