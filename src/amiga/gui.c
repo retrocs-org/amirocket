@@ -145,6 +145,9 @@ typedef struct {
     volatile int sugg_move;       /* arrow keys while the panel is open */
     volatile int sugg_close;      /* Esc */
     int      sugg_sel;
+    volatile int last_key;        /* last raw key the edit hook saw (shown in the panel) */
+    int      click_seen[G_COUNT]; /* click already handled via notification */
+    ULONG    last_click_ms[G_COUNT];
     BYTE     dirty_sig;
     ULONG    dirty;            /* DIRTY_* bits */
     int      chat_relayout;
@@ -432,6 +435,18 @@ static void draw_suggestions(const struct IBox *box)
         Text(rp, (CONST_STRPTR)"Emoji", 5);
     else
         Text(rp, (CONST_STRPTR)"People", 6);
+    SetSoftStyle(rp, 0, AskSoftStyle(rp));
+    {
+        char hint[80];
+        int hl, hw;
+        snprintf(hint, sizeof(hint), "Up/Down select  Return insert  Esc close   [key $%02X]", (unsigned)(G.last_key & 0xFF));
+        hl = (int)strlen(hint);
+        hw = TextLength(rp, (CONST_STRPTR)hint, (ULONG)hl);
+        if (right - 8 - hw > left + 8 + TextLength(rp, (CONST_STRPTR)"People", 6) + 16) {
+            Move(rp, right - 8 - hw, top + base);
+            Text(rp, (CONST_STRPTR)hint, (ULONG)hl);
+        }
+    }
     for (i = 0; i < G.n_sugg; i++) {
         int y = top + (i + 1) * rh, x = left + 8, dot = rp->TxHeight / 2;
         Buf b;
@@ -579,6 +594,8 @@ static int over(Object *o, WORD mx, WORD my)
 
 static void update_suggestions(void);
 static void redraw_dirty(void);
+static void on_side_click(void);
+static void on_chat_click(void);
 
 /* String edit hook on the input line. Intuition calls it for every key
  * (in input.device's context), after its own editing: only note what
@@ -599,8 +616,10 @@ static ULONG edit_hook_func(struct Hook *h, struct SGWork *sgw, ULONG *msg)
         G.hook_buf[n] = 0;
         G.hook_pos = sgw->BufferPos > n ? n : sgw->BufferPos;
     }
+    if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY)
+        G.last_key = sgw->IEvent->ie_Code;
     if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY && G.n_sugg) {
-        UWORD code = sgw->IEvent->ie_Code;
+        UWORD code = sgw->IEvent->ie_Code & ~IECODE_UP_PREFIX;
         if (code == 0x4C)            /* cursor up */
             G.sugg_move--;
         else if (code == 0x4D)       /* cursor down */
@@ -644,7 +663,21 @@ static ULONG idcmp_hook_func(struct Hook *h, APTR obj, struct IntuiMessage *im)
     if (im->Class == IDCMP_IDCMPUPDATE) {
         struct TagItem *tags = (struct TagItem *)im->IAddress;
         struct TagItem *ti = FindTagItem(GA_ID, tags), *top = FindTagItem(SCROLLER_Top, tags);
-        if (ti && ti->ti_Data == G_INPUT) {
+        if (ti && (ti->ti_Data == G_ROOMS || ti->ti_Data == G_MSGS) && FindTagItem(SPACE_MouseY, tags)) {
+            /* space.gadget reports clicks as notifications with the mouse
+             * position; it may repeat them while the button is held, so act
+             * once per 300 ms */
+            ULONG now = im->Seconds * 1000UL + im->Micros / 1000UL;
+            G.click_seen[ti->ti_Data] = 1;
+            if (now - G.last_click_ms[ti->ti_Data] > 300) {
+                G.last_click_ms[ti->ti_Data] = now;
+                if (ti->ti_Data == G_ROOMS)
+                    on_side_click();
+                else
+                    on_chat_click();
+                redraw_dirty();
+            }
+        } else if (ti && ti->ti_Data == G_INPUT) {
             update_suggestions();
             redraw_dirty();
         } else if (ti && top) {
@@ -925,6 +958,8 @@ static void on_chat_click(void)
     i = (G.win->MouseY - top) / rh - 1;
     if (G.win->MouseY >= top && i >= 0 && i < G.n_sugg)
         complete_suggestion(i);
+    else
+        hide_suggestions();
 }
 
 static void on_side_click(void)
@@ -1462,7 +1497,10 @@ static void handle_main(void)
         case WMHI_GADGETUP:
             switch (result & WMHI_GADGETMASK) {
             case G_ROOMS:
-                on_side_click();
+                if (G.click_seen[G_ROOMS])
+                    G.click_seen[G_ROOMS] = 0;
+                else
+                    on_side_click();
                 break;
             case G_SIDESCROLL: {
                 ULONG top = 0;
@@ -1477,13 +1515,16 @@ static void handle_main(void)
                 break;
             }
             case G_INPUT:
-                if (G.n_sugg && (code == 9 || code == 13 || code == 10 || code == 0))
-                    complete_suggestion(G.sugg_sel);   /* Return/Tab: take the selected match */
+                if (G.n_sugg)
+                    complete_suggestion(G.sugg_sel);   /* Return/Tab (any key code): take the selection */
                 else if (code != 9 && code != 0x5F)   /* not Tab / Help */
                     cmd_send_input();
                 break;
             case G_MSGS:
-                on_chat_click();
+                if (G.click_seen[G_MSGS])
+                    G.click_seen[G_MSGS] = 0;
+                else
+                    on_chat_click();
                 break;
             case G_SEND:
                 cmd_send_input();
@@ -1786,6 +1827,7 @@ static int open_main(void)
             LAYOUT_AddChild, G.g[G_ROOMS] = SpaceObject,
                 GA_ID, G_ROOMS,
                 GA_RelVerify, TRUE,
+                ICA_TARGET, ICTARGET_IDCMP,
                 SPACE_Transparent, TRUE,
                 SPACE_RenderHook, (ULONG)&G.render_hook,
             End,
@@ -1813,6 +1855,7 @@ static int open_main(void)
                     LAYOUT_AddChild, G.g[G_MSGS] = SpaceObject,
                         GA_ID, G_MSGS,
                         GA_RelVerify, TRUE,
+                        ICA_TARGET, ICTARGET_IDCMP,
                         SPACE_Transparent, TRUE,
                         SPACE_RenderHook, (ULONG)&G.render_hook,
                     End,
