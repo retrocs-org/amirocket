@@ -1,0 +1,120 @@
+# AmiRocket
+
+A native Rocket.Chat client for AmigaOS 3.2 that connects to ordinary self-hosted Rocket.Chat servers over HTTPS. It uses `bsdsocket.library` (Roadshow, AmiTCP or Miami) for networking, AmiSSL v5 for TLS and a ReAction interface.
+
+Status: **0.1, first milestone**. You can log in, browse your rooms and direct messages, read history, send messages and receive new messages, edits and deletions by polling. Threads, reactions, file upload and the realtime WebSocket API come later; see [Roadmap](#roadmap).
+
+## Requirements
+
+| | |
+| --- | --- |
+| OS | AmigaOS 3.2 (ReAction classes V44+, so 3.1.4 should work too) |
+| CPU | 68020 or better. AmiSSL 5 requires it. A 68040/060 or an emulated/accelerated machine makes the TLS handshake fast |
+| Memory | About 1 MB free while running |
+| TCP/IP | Any `bsdsocket.library` stack: Roadshow, AmiTCP or Miami |
+| TLS | [AmiSSL](https://github.com/jens-maus/amissl) 5.1 or newer for `https://` servers |
+| Server | Rocket.Chat 6.x–8.x. Uses only long-standing REST endpoints |
+
+## Using it
+
+Start `AmiRocket` from Workbench or the Shell. In the login window, enter the server (`chat.example.com`, `https://chat.example.com:3000` or a sub-path such as `https://example.com/chat`), your user name and your password. If the account uses two-factor authentication, AmiRocket asks for the code. Authenticator app (TOTP) and e-mail codes both work.
+
+With **Remember login** ticked, AmiRocket saves the Rocket.Chat user id and auth token in `ENVARC:AmiRocket.prefs` and logs in without a password next time. The password is never stored. **Project → Log out and forget login** revokes the token on the server and deletes it locally.
+
+Rooms appear on the left (`#` public channel, `*` private group, `@` direct message, unread count in brackets). New messages in the open room arrive within the poll interval, 5 seconds by default (`interval=` in the prefs file). Messages that mention you are highlighted.
+
+Text is converted between UTF-8 and the Amiga's ISO-8859-1. Typographic quotes and dashes become ASCII, and common emoji become emoticons (`🙂` → `:)`, `👍` → `(y)`). Anything else shows as `?`.
+
+### Shell options
+
+```
+AmiRocket SELFTEST
+AmiRocket PROBE=https://chat.example.com [USER=name PASSWORD=secret [CODE=123456]] [INSECURE]
+```
+
+`SELFTEST` runs the core unit tests on the Amiga itself (68k, big-endian, 32-bit `long`) and reports whether `bsdsocket.library` and AmiSSL are usable. `PROBE` checks DNS, TCP, TLS and the server from the Shell without opening a window. With credentials, it also logs in, lists rooms and prints the last messages of the first room. `INSECURE` skips certificate verification.
+
+## Building
+
+Cross-compile on the Mac with the AmigaPorts toolchain in `~/Development/tools/amiga/m68k-amigaos-gcc-16.2`:
+
+```sh
+make                    # build/amiga/AmiRocket (68020)
+make AMIGA_CPU=-m68040  # other CPU targets
+make install-builds     # copy to ~/Development/builds/AmiRocket (Builds: in the emulator)
+make release            # build/release/AmiRocket-0.1.lha
+```
+
+Set `AMIGA_PREFIX=` if the toolchain lives somewhere else.
+
+### Host tools and tests
+
+The protocol core (`src/core`) is portable C99 and also builds for macOS and Linux against OpenSSL. On the Mac, `brew install openssl@3` is enough, because the Makefile finds it through `brew --prefix`.
+
+```sh
+make host     # build/host/rcli and build/host/test_core
+make test     # unit tests + integration tests against the mock server
+```
+
+`rcli` is a command-line Rocket.Chat client built from exactly the code the Amiga client uses. It is handy for checking a real server:
+
+```sh
+build/host/rcli -s https://chat.example.com -u tommy -p secret rooms
+build/host/rcli -s https://chat.example.com -u tommy -p secret history general 20
+build/host/rcli -s https://chat.example.com -i USERID -t TOKEN watch general 5
+build/host/rcli -L ...        # print through the Amiga ISO-8859-1 conversion
+```
+
+`tests/mock_rocketchat.py` is a mock Rocket.Chat server with the response shapes of the real one, plus hooks to inject, edit and delete messages and remove rooms. The integration tests run it with keep-alive, with connections silently dropped by the server, chunked responses, `\u`-escaped JSON, a sub-path, TLS with and without verification, 2FA and token login.
+
+### Testing in the emulator
+
+The tests use `/Applications/Amiga Workbench.app` from AmigaMac:
+
+```sh
+AMIGAMAC='/Applications/Amiga Workbench.app/Contents/MacOS/AmigaWorkbench'
+"$AMIGAMAC" --workbench latest --mount "Builds:$PWD/build/amiga" \
+    --test qa/selftest.json --output qa-results/selftest-$(date +%s)
+"$AMIGAMAC" --workbench latest --mount "Builds:$PWD/build/amiga" \
+    --test qa/probe-public.json --output qa-results/probe-$(date +%s)
+```
+
+The `probe-public` test needs the emulator's Roadshow network (en0 bridge) and internet access. To try the GUI against the mock server, run `python3 tests/mock_rocketchat.py --host 0.0.0.0 --port 3000` on the Mac. Then log in from the emulator to `http://<mac-lan-ip>:3000` as `tommy` / `secret` (the `secure` / `secret` user needs 2FA code `123456`).
+
+## Architecture
+
+```
+src/core/      portable C99, no OS calls
+  http.c         HTTP/1.1, persistent connection, chunked, reconnect on stale keep-alive
+  json.c         two-pass tokenizer (one allocation per document), builder
+  rc_api.c       Rocket.Chat REST calls, error/2FA mapping, data model and merge
+  session.c      login state, room list, polling strategy
+  charset.c      UTF-8 <-> ISO-8859-1 with readable fallbacks
+  timeutil.c     ISO 8601 / HTTP dates without libc time functions
+src/amiga/
+  main.c         ReadArgs: GUI, SELFTEST, PROBE
+  gui.c          ReAction windows, menus, list rendering
+  worker.c       network process; NetMsg commands, replies and poll events
+  net_amiga.c    bsdsocket.library + AmiSSL transport
+  mem_amiga.c    semaphore-protected exec memory pool
+  prefs.c        ENV:/ENVARC:AmiRocket.prefs
+src/posix/       sockets + OpenSSL transport for rcli and tests
+```
+
+**Networking off the GUI task.** Every network call runs in a separate process (`AmiRocket network`), so the window never freezes during a multi-second TLS handshake on a 68020. The GUI and the worker exchange `NetMsg` messages. Commands come back as replies, and poll results arrive as events the GUI returns. `bsdsocket.library` and AmiSSL are opened by the worker, because their bases are per task. Quitting sends Ctrl-C to the worker to abort a blocking socket call, then waits for it to finish.
+
+**One allocator for both tasks.** libnix `malloc()` is not safe to call from two tasks at once, so all core allocations go through `ar_malloc()`, an exec memory pool guarded by a semaphore. Deleting the pool on exit releases anything that leaked.
+
+**Polling.** The client uses REST only. Each poll requests `subscriptions.get?updatedSince=` for the room list and `chat.syncMessages?lastUpdate=` for the open room, both over the same keep-alive connection. Cursors always come from server timestamps (`_updatedAt`, HTTP `Date`), never the Amiga clock. Local time is derived from the server's `Date` header compared with the Amiga clock, falling back to the Locale preferences.
+
+**Server compatibility.** Endpoints: `/api/info`, `login`, `me`, `logout`, `subscriptions.get`, `subscriptions.read`, `channels|groups|im.history`, `chat.syncMessages`, `chat.sendMessage`. Rocket.Chat 9.0 changed REST status codes, so success is judged from the JSON `success`/`status` fields rather than the HTTP status alone.
+
+## Roadmap
+
+- Realtime updates over DDP/WebSocket (`stream-room-messages`, `stream-notify-user`) instead of polling
+- Threads view, reactions, message editing/deleting, `@` completion
+- Load older history when scrolling up
+- File download through datatypes; upload
+- Markdown rendering (bold/italic via soft styles), clickable links via OpenURL
+- Notifications (screen title, ScreenNotify/Ringhio), AppIcon/iconify, Locale catalogs
+- 68000 build without TLS (plain HTTP inside a LAN)

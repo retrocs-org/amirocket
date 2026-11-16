@@ -1,0 +1,7 @@
+{
+  "name": "AmiRocket PROBE: DNS, TCP and AmiSSL against open.rocket.chat",
+  "application": "Builds:AmiRocket",
+  "arguments": ["PROBE=https://open.rocket.chat"],
+  "timeoutSeconds": 300,
+  "expectedReturnCode": 0
+}
