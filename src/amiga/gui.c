@@ -395,10 +395,21 @@ static void rooms_rebuild(void)
                        TAG_END);
 }
 
+/* Two columns: a narrow empty gutter (where the desktop client shows
+ * avatars) and the text, so wrapped lines stay aligned under the text. */
+static struct ColumnInfo g_msg_cols[] = {
+    { 3,  (STRPTR)"", 0 },
+    { 97, (STRPTR)"", 0 },
+    { -1, NULL, 0 }
+};
+
 static int add_row(const char *text, int pen)
 {
-    struct Node *n = AllocListBrowserNode(1,
+    struct Node *n = AllocListBrowserNode(2,
         LBNA_Column, 0,
+            LBNCA_CopyText, TRUE,
+            LBNCA_Text, (ULONG)"",
+        LBNA_Column, 1,
             LBNCA_CopyText, TRUE,
             LBNCA_Text, (ULONG)text,
             LBNCA_WordWrap, TRUE,
@@ -498,7 +509,7 @@ static void msgs_rebuild(int scroll_bottom)
 
         if (sys) {
             buf_clear(&text);
-            buf_puts(&text, "  * ");
+            buf_puts(&text, "* ");
             to_latin1(&text, m->username, 0);
             buf_putc(&text, ' ');
             buf_puts(&text, sys);
@@ -553,7 +564,6 @@ static void msgs_rebuild(int scroll_bottom)
             if (nl)
                 *nl = 0;
             buf_clear(&line);
-            buf_puts(&line, "    ");
             buf_puts(&line, p);
             rows += add_row(buf_str(&line), pen);
             if (!nl)
@@ -1216,6 +1226,7 @@ static int open_main(void)
                     GA_ID, G_MSGS,
                     GA_ReadOnly, TRUE,
                     LISTBROWSER_Labels, (ULONG)&G.msg_list,
+                    LISTBROWSER_ColumnInfo, (ULONG)g_msg_cols,
                     LISTBROWSER_WrapText, TRUE,
                     LISTBROWSER_AutoWheel, TRUE,
                 End,
