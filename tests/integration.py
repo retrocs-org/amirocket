@@ -122,7 +122,7 @@ def test_basic():
 
         rc, out, err = rcli("-L", *login_args(m), "history", "#general", "20")
         check("Hej p\u00e5 dig 'quoted' \"double\" - caf\u00e9 :D EUR5" in out, "Latin-1 conversion", out)
-        check("bold and it :) see docs (https://x.org/a_b) code_here" in out, "markup removed as in the GUI", out)
+        check("bold and it :D see docs (https://x.org/a_b) code_here" in out, "markup removed as in the GUI", out)
 
         rc, out, err = rcli(*login_args(m), "history", "general", "50")
         check(rc == 0 and "* joined the room" in out, "system message text", out)

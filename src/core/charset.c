@@ -1,4 +1,5 @@
 #include "charset.h"
+#include "emoji.h"
 
 #include <string.h>
 
@@ -92,13 +93,28 @@ int utf8_decode(const unsigned char *s, unsigned long *cp)
 
 void utf8_to_latin1(Buf *out, const char *utf8, int multiline)
 {
+    utf8_to_latin1_ex(out, utf8, multiline, 0);
+}
+
+void utf8_to_latin1_ex(Buf *out, const char *utf8, int multiline, int marks)
+{
     const unsigned char *s = (const unsigned char *)utf8;
 
     while (*s) {
         unsigned long cp;
         const char *rep;
+        int e;
 
         s += utf8_decode(s, &cp);
+        if (cp >= 0x2000 && (e = emoji_by_cp(cp)) >= 0) {
+            if (marks) {
+                buf_putc(out, (char)EMOJI_MARK);
+                buf_putc(out, (char)(EMOJI_BASE + e));
+            } else {
+                buf_puts(out, emoji_table[e].fallback);
+            }
+            continue;
+        }
         if (cp == '\n') {
             buf_putc(out, multiline ? '\n' : ' ');
         } else if (cp == '\t') {

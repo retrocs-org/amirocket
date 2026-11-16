@@ -8,6 +8,7 @@
 #include "../src/core/charset.h"
 #include "../src/core/json.h"
 #include "../src/core/mdtext.h"
+#include "../src/core/emoji.h"
 #include "../src/core/mem.h"
 #include "../src/core/rc_api.h"
 #include "../src/core/timeutil.h"
@@ -263,7 +264,8 @@ static void test_markdown(void)
     MD("see [the docs](https://example.com/a_b_c)", "see the docs (https://example.com/a_b_c)");
     MD("[https://x.org](https://x.org)", "https://x.org");
     MD("https://example.com/some_path_with_underscores_ ok", "https://example.com/some_path_with_underscores_ ok");
-    MD("hi :smile: :thumbsup: :unknown_code: a:b:c", "hi :) (y) :unknown_code: a:b:c");
+    MD("hi :smile: :thumbsup: :+1: :unknown_code: a:b:c",
+       "hi \xF0\x9F\x98\x84 \xF0\x9F\x91\x8D \xF0\x9F\x91\x8D :unknown_code: a:b:c");
     MD("# Title\n## Sub", "Title\nSub");
     MD("before\n```yaml\nkey: *value*\n  - _x_\n```\nafter *b*", "before\nkey: *value*\n  - _x_\nafter b");
     MD("```one line```", "one line");
@@ -272,6 +274,27 @@ static void test_markdown(void)
     MD("unclosed `tick and *star", "unclosed `tick and *star");
     MD("\xC3\xA5*\xC3\xA4*", "\xC3\xA5*\xC3\xA4*");      /* no emphasis inside a word */
     MD("*\xC3\xA5ngest*", "\xC3\xA5ngest");
+}
+
+static void test_emoji(void)
+{
+    Buf b;
+    int out[8], n;
+
+    CHECK(emoji_by_cp(0x1F604) == 0);
+    CHECK(emoji_by_code("thumbsup", 8) >= 0 && emoji_by_code("+1", 2) == emoji_by_code("thumbsup", 8));
+    CHECK(emoji_by_code("nope", 4) == -1);
+    n = emoji_complete("smi", out, 8);
+    CHECK(n >= 2 && !strcmp(emoji_table[out[0]].code, "smile"));
+    n = emoji_complete("thumbs", out, 8);
+    CHECK(n == 2);
+    buf_init(&b);
+    utf8_to_latin1_ex(&b, "hej \xF0\x9F\x98\x84!", 0, 1);
+    CHECK(b.len == 7 && b.data[4] == EMOJI_MARK && (unsigned char)b.data[5] == EMOJI_BASE + 0 && b.data[6] == '!');
+    buf_clear(&b);
+    utf8_to_latin1_ex(&b, "\xF0\x9F\xA5\x82 \xE2\x9D\xA4\xEF\xB8\x8F", 0, 0);
+    CHECK_STR(buf_str(&b), "(cheers) <3");
+    buf_free(&b);
 }
 
 int run_core_tests(void (*log)(const char *))
@@ -287,6 +310,7 @@ int run_core_tests(void (*log)(const char *))
     test_time();
     test_merge();
     test_markdown();
+    test_emoji();
     snprintf(b, sizeof(b), "core tests: %d passed, %d failed\n", g_pass, g_fail);
     log(b);
     return g_fail;

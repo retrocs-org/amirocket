@@ -12,13 +12,21 @@
 
 #include "../core/buf.h"
 #include "../core/rc_api.h"
+#include "emoji_data.h"
 
 typedef struct {
     LONG bg, text, dim, accent, accent_text, highlight;
     LONG side_bg, side_sel, side_text, side_dim;
     LONG sep, pill_bg;
     LONG avatar[6];
+    LONG emoji[EMOJI_COLOURS];   /* [0] unused (transparent) */
 } ViewPens;
+
+/* Text drawing that understands emoji markers (see core/emoji.h). */
+int  view_text_width(struct RastPort *rp, const char *s, int len);
+void view_text(struct RastPort *rp, const ViewPens *p, int x, int y, int line_h, const char *s, int len);
+void view_emoji(struct RastPort *rp, const ViewPens *p, int x, int y, int idx);
+int  view_emoji_size(struct RastPort *rp);
 
 /* ---- message view ---- */
 

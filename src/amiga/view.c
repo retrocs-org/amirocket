@@ -1,5 +1,6 @@
 #include "view.h"
 #include "../core/charset.h"
+#include "../core/emoji.h"
 #include "../core/mdtext.h"
 #include "../core/mem.h"
 #include "../core/timeutil.h"
@@ -33,21 +34,124 @@ static int text_indent(int lh)
     return PAD + avatar_size(lh) + 8;
 }
 
+/* ---- emoji-aware text ---- */
+
+static const ViewPens *g_pens;   /* pens for emoji while drawing */
+
+static int esize_index(struct RastPort *rp)
+{
+    int i, best = 0;
+    for (i = 0; i < EMOJI_NSIZES; i++)
+        if (emoji_sizes[i] <= rp->TxHeight + 2)
+            best = i;
+    return best;
+}
+
+int view_emoji_size(struct RastPort *rp)
+{
+    return emoji_sizes[esize_index(rp)];
+}
+
+static int is_mark(const char *s, int i, int len)
+{
+    return (unsigned char)s[i] == EMOJI_MARK && i + 1 < len && (unsigned char)s[i + 1] >= EMOJI_BASE;
+}
+
+int view_text_width(struct RastPort *rp, const char *s, int len)
+{
+    int w = 0, i = 0, ew = view_emoji_size(rp) + 1;
+    while (i < len) {
+        int j = i;
+        if (is_mark(s, i, len)) {
+            w += ew;
+            i += 2;
+            continue;
+        }
+        while (j < len && !is_mark(s, j, len))
+            j++;
+        w += TextLength(rp, (CONST_STRPTR)s + i, (ULONG)(j - i));
+        i = j;
+    }
+    return w;
+}
+
+void view_emoji(struct RastPort *rp, const ViewPens *p, int x, int y, int idx)
+{
+    int si = esize_index(rp), sz = emoji_sizes[si], r, c;
+    const unsigned char *bm = emoji_bitmap(idx, si);
+    if (!bm)
+        return;
+    for (r = 0; r < sz; r++) {
+        const unsigned char *row = bm + r * sz;
+        for (c = 0; c < sz;) {
+            int v = row[c], e = c;
+            while (e < sz && row[e] == v)
+                e++;
+            if (v) {
+                SetAPen(rp, p->emoji[v]);
+                RectFill(rp, x + c, y + r, x + e - 1, y + r);
+            }
+            c = e;
+        }
+    }
+}
+
+void view_text(struct RastPort *rp, const ViewPens *p, int x, int y, int line_h, const char *s, int len)
+{
+    int i = 0, ew = view_emoji_size(rp) + 1;
+    ULONG pen = rp->FgPen;
+    while (i < len) {
+        int j = i;
+        if (is_mark(s, i, len)) {
+            if (p)
+                view_emoji(rp, p, x, y + (line_h - view_emoji_size(rp)) / 2, (unsigned char)s[i + 1] - EMOJI_BASE);
+            SetAPen(rp, pen);
+            x += ew;
+            i += 2;
+            continue;
+        }
+        while (j < len && !is_mark(s, j, len))
+            j++;
+        Move(rp, x, y + rp->TxBaseline + 1);
+        Text(rp, (CONST_STRPTR)s + i, (ULONG)(j - i));
+        x += TextLength(rp, (CONST_STRPTR)s + i, (ULONG)(j - i));
+        i = j;
+    }
+}
+
 static void text_at(struct RastPort *rp, int x, int y, const char *s, int len)
 {
     if (len <= 0)
         return;
-    Move(rp, x, y + rp->TxBaseline + 1);
-    Text(rp, (CONST_STRPTR)s, len);
+    view_text(rp, g_pens, x, y, rp->TxHeight + 3, s, len);
 }
 
-/* Characters of s that fit in maxw pixels. */
+/* Characters of s that fit in maxw pixels; never splits an emoji. */
 static int fit(struct RastPort *rp, const char *s, int len, int maxw)
 {
     struct TextExtent te;
+    int w = 0, i = 0, ew = view_emoji_size(rp) + 1;
+
     if (maxw <= 0 || len <= 0)
         return 0;
-    return (int)TextFit(rp, (CONST_STRPTR)s, (ULONG)len, &te, NULL, 1, (ULONG)maxw, 32767);
+    while (i < len) {
+        int j = i, n;
+        if (is_mark(s, i, len)) {
+            if (w + ew > maxw)
+                return i;
+            w += ew;
+            i += 2;
+            continue;
+        }
+        while (j < len && !is_mark(s, j, len))
+            j++;
+        n = (int)TextFit(rp, (CONST_STRPTR)s + i, (ULONG)(j - i), &te, NULL, 1, (ULONG)(maxw - w), 32767);
+        if (n < j - i)
+            return i + n;
+        w += TextLength(rp, (CONST_STRPTR)s + i, (ULONG)(j - i));
+        i = j;
+    }
+    return len;
 }
 
 static void bold(struct RastPort *rp, int on)
@@ -279,7 +383,7 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
         buf_clear(&md);
         md_to_plain(&md, m->text);
         buf_clear(&text);
-        utf8_to_latin1(&text, buf_str(&md), 1);
+        utf8_to_latin1_ex(&text, buf_str(&md), 1, 1);
         if (m->n_attachments) {
             if (text.len)
                 buf_putc(&text, '\n');
@@ -309,27 +413,26 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
                 size_t l = e ? (size_t)(e - r) : strlen(r);
                 sp = (const char *)memchr(r, ' ', l);
                 if (sp && (size_t)(sp - r) < sizeof(code)) {
-                    const char *emo;
+                    int e;
                     memcpy(code, r, (size_t)(sp - r));
                     code[sp - r] = 0;
-                    emo = md_emoticon(code);
+                    e = emoji_by_code(code, strlen(code));
                     if (para.len)
                         buf_putc(&para, '\n');
-                    if (emo)
-                        buf_puts(&para, emo);
-                    else
+                    if (e >= 0) {
+                        buf_putc(&para, (char)EMOJI_MARK);
+                        buf_putc(&para, (char)(EMOJI_BASE + e));
+                    } else {
                         buf_printf(&para, ":%s:", code);
+                    }
                     buf_append(&para, sp, l - (size_t)(sp - r));
                 }
                 r += l;
                 if (*r == '\n')
                     r++;
             }
-            if (para.len) {
-                buf_clear(&text);
-                utf8_to_latin1(&text, buf_str(&para), 1);
-                add_line(cv, VL_PILLS, buf_str(&text), (int)text.len);
-            }
+            if (para.len)   /* Latin-1 with emoji markers (codes are ASCII) */
+                add_line(cv, VL_PILLS, buf_str(&para), (int)para.len);
         }
     }
     buf_free(&text);
@@ -352,7 +455,7 @@ void chat_scroll_to(ChatView *cv, int top)
 
 static void pill(struct RastPort *rp, int x, int y, int h, const char *s, int len, const ViewPens *p)
 {
-    int w = TextLength(rp, (CONST_STRPTR)s, (ULONG)len) + 10;
+    int w = view_text_width(rp, s, len) + 10;
     SetAPen(rp, p->sep);
     RectFill(rp, x, y + 1, x + w - 1, y + h - 2);
     SetAPen(rp, p->pill_bg);
@@ -372,6 +475,7 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
 
     if (box->Width <= 0 || box->Height <= 0)
         return;
+    g_pens = p;
     cv->visible = box->Height / lh;
     if (cv->follow)
         cv->top = cv->n - cv->visible;
@@ -390,7 +494,7 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
 
         switch (l->kind) {
         case VL_DAY: {
-            int tw = TextLength(rp, (CONST_STRPTR)s, (ULONG)l->len);
+            int tw = view_text_width(rp, s, l->len);
             int cx = left + (box->Width - tw) / 2, my = y + lh / 2;
             SetAPen(rp, p->sep);
             if (cx - 10 > left + PAD)
@@ -419,7 +523,7 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             SetAPen(rp, p->text);
             n = fit(rp, s, l->name_len, avail);
             text_at(rp, x, y, s, n);
-            nw = TextLength(rp, (CONST_STRPTR)s, (ULONG)n);
+            nw = view_text_width(rp, s, n);
             bold(rp, 0);
             SetAPen(rp, p->dim);
             if (l->len > l->name_len) {
@@ -446,7 +550,7 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             while (q < end) {
                 const char *e = (const char *)memchr(q, '\n', (size_t)(end - q));
                 int len = (int)((e ? e : end) - q);
-                int w = TextLength(rp, (CONST_STRPTR)q, (ULONG)len) + 10;
+                int w = view_text_width(rp, q, len) + 10;
                 if (px + w > right - PAD)
                     break;
                 pill(rp, px, y, lh, q, len, p);
@@ -523,6 +627,7 @@ void side_draw(SideView *sv, struct RastPort *rp, const struct IBox *box, const 
 
     if (box->Width <= 0 || box->Height <= 0)
         return;
+    g_pens = p;
     sv->row_h = rh;
     sv->visible = box->Height / rh;
     side_scroll_to(sv, sv->top);
@@ -601,6 +706,7 @@ void header_draw(struct RastPort *rp, const struct IBox *box, const ViewPens *p,
 
     if (box->Width <= 0 || box->Height <= 0)
         return;
+    g_pens = p;
     SetDrMd(rp, JAM2);
     SetAPen(rp, p->bg);
     RectFill(rp, left, box->Top, right, bottom);
@@ -611,7 +717,7 @@ void header_draw(struct RastPort *rp, const struct IBox *box, const ViewPens *p,
     bold(rp, 1);
     n = fit(rp, title, (int)strlen(title), right - x - PAD);
     text_at(rp, x, ty, title, n);
-    x += TextLength(rp, (CONST_STRPTR)title, (ULONG)n) + rp->TxWidth;
+    x += view_text_width(rp, title, n) + rp->TxWidth;
     bold(rp, 0);
     if (favorite) {
         SetAPen(rp, p->highlight);

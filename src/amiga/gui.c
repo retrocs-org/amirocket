@@ -15,6 +15,8 @@
 #include "prefs.h"
 #include "theme.h"
 #include "view.h"
+#include "emoji_data.h"
+#include "../core/emoji.h"
 #include "worker.h"
 #include "../core/charset.h"
 #include "../core/mdtext.h"
@@ -28,6 +30,8 @@
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <intuition/icclass.h>
+#include <intuition/sghooks.h>
+#include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <utility/hooks.h>
 #include <graphics/regions.h>
@@ -132,15 +136,20 @@ typedef struct {
     SideView side;
     ChatView chat;
     ViewPens pens;
-    LONG     obtained[TC_COUNT + 8];
+    LONG     obtained[TC_COUNT + 8 + EMOJI_COLOURS];
     int      n_obtained;
-    struct Hook render_hook, idcmp_hook;
+    struct Hook render_hook, idcmp_hook, edit_hook;
+    volatile int input_changed;   /* set by the string edit hook */
+    volatile int sugg_move;       /* arrow keys while the panel is open */
+    volatile int sugg_close;      /* Esc */
+    int      sugg_sel;
     BYTE     dirty_sig;
     ULONG    dirty;            /* DIRTY_* bits */
     int      chat_relayout;
     char     topic[256];       /* UTF-8 */
     char    *members;          /* open room: "username\tname\tstatus\n" lines (UTF-8) */
-    struct { char user[96]; char name[96]; int online; int recent; } sugg[MAX_SUGG];
+    struct { char user[96]; char name[96]; int online; int recent; int emoji; } sugg[MAX_SUGG];
+    int      sugg_kind;        /* 0 people (@), 1 emoji (:) */
     int      n_sugg;
     int      sugg_at, sugg_end;  /* '@' position and cursor in the input text */
 
@@ -417,22 +426,39 @@ static void draw_suggestions(const struct IBox *box)
     SetAPen(rp, p->dim);
     SetSoftStyle(rp, FSF_BOLD, AskSoftStyle(rp));
     Move(rp, left + 8, top + base);
-    Text(rp, (CONST_STRPTR)"People", 6);
+    if (G.sugg_kind == 1)
+        Text(rp, (CONST_STRPTR)"Emoji", 5);
+    else
+        Text(rp, (CONST_STRPTR)"People", 6);
     for (i = 0; i < G.n_sugg; i++) {
         int y = top + (i + 1) * rh, x = left + 8, dot = rp->TxHeight / 2;
         Buf b;
         if (y + rh > box->Top + box->Height)
             break;
-        if (i == 0) {
+        if (i == G.sugg_sel) {
             SetAPen(rp, p->side_sel);
             RectFill(rp, left + 1, y, right - 1, y + rh - 1);
         }
-        SetBPen(rp, i == 0 ? p->side_sel : p->side_bg);
+        SetBPen(rp, i == G.sugg_sel ? p->side_sel : p->side_bg);
+        if (G.sugg_kind == 1) {
+            int es = view_emoji_size(rp);
+            Buf c;
+            view_emoji(rp, p, x, y + (rh - es) / 2, G.sugg[i].emoji);
+            buf_init(&c);
+            buf_printf(&c, ":%s:", G.sugg[i].user);
+            SetAPen(rp, p->text);
+            SetSoftStyle(rp, FSF_BOLD, AskSoftStyle(rp));
+            Move(rp, x + es + 8, y + base);
+            Text(rp, (CONST_STRPTR)buf_str(&c), (ULONG)c.len);
+            SetSoftStyle(rp, 0, AskSoftStyle(rp));
+            buf_free(&c);
+            continue;
+        }
         /* presence dot */
         SetAPen(rp, G.sugg[i].online ? p->avatar[2] : p->dim);
         RectFill(rp, x, y + (rh - dot) / 2, x + dot - 1, y + (rh - dot) / 2 + dot - 1);
         if (!G.sugg[i].online) {
-            SetAPen(rp, i == 0 ? p->side_sel : p->side_bg);
+            SetAPen(rp, i == G.sugg_sel ? p->side_sel : p->side_bg);
             RectFill(rp, x + 1, y + (rh - dot) / 2 + 1, x + dot - 2, y + (rh - dot) / 2 + dot - 2);
         }
         x += dot + 8;
@@ -551,6 +577,51 @@ static int over(Object *o, WORD mx, WORD my)
 
 static void update_suggestions(void);
 static void redraw_dirty(void);
+
+/* String edit hook on the input line. Intuition calls it for every key
+ * (in input.device's context), after its own editing: only note what
+ * happened and wake the main loop, which reads the text itself. */
+static ULONG edit_hook_func(struct Hook *h, struct SGWork *sgw, ULONG *msg)
+{
+    if (*msg != SGH_KEY)
+        return 0;
+    if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY && G.n_sugg) {
+        UWORD code = sgw->IEvent->ie_Code;
+        if (code == 0x4C)            /* cursor up */
+            G.sugg_move--;
+        else if (code == 0x4D)       /* cursor down */
+            G.sugg_move++;
+        else if (code == 0x45)       /* Esc */
+            G.sugg_close = 1;
+    }
+    G.input_changed = 1;
+    if (G.dirty_sig >= 0)
+        Signal((struct Task *)G.port->mp_SigTask, 1UL << G.dirty_sig);
+    return ~0UL;
+}
+
+static void input_events(void)
+{
+    if (G.sugg_close) {
+        G.sugg_close = 0;
+        G.sugg_move = 0;
+        G.input_changed = 0;
+        G.n_sugg = 0;
+        mark_dirty(DIRTY_CHAT);
+        return;
+    }
+    if (G.input_changed) {
+        int move = G.sugg_move;
+        G.input_changed = 0;
+        G.sugg_move = 0;
+        if (move && G.n_sugg) {
+            G.sugg_sel = (G.sugg_sel + move % G.n_sugg + G.n_sugg) % G.n_sugg;
+            mark_dirty(DIRTY_CHAT);
+        } else {
+            update_suggestions();
+        }
+    }
+}
 
 /* IDCMP hook: live scroller dragging and the mouse wheel. Runs in our task
  * from inside RA_HandleInput(). */
@@ -705,12 +776,39 @@ static void update_suggestions(void)
     at = (int)pos;
     while (at > 0 && is_name_char((unsigned char)txt[at - 1]))
         at--;
-    if (at == 0 || txt[at - 1] != '@' || (at >= 2 && txt[at - 2] != ' ')) {
+    if (at == 0 || (txt[at - 1] != '@' && txt[at - 1] != ':') || (at >= 2 && txt[at - 2] != ' ')) {
         hide_suggestions();
         return;
     }
     G.sugg_at = at - 1;
     G.sugg_end = (int)pos;
+    if (txt[at - 1] == ':') {   /* :smi -> emoji by shortcode */
+        char prefix[40];
+        int idx[MAX_SUGG], n, k;
+        size_t pl = pos - (ULONG)at;
+        if (pl < 2 || pl >= sizeof(prefix)) {
+            hide_suggestions();
+            return;
+        }
+        memcpy(prefix, txt + at, pl);
+        prefix[pl] = 0;
+        n = emoji_complete(prefix, idx, MAX_SUGG);
+        G.sugg_kind = 1;
+        G.n_sugg = 0;
+        for (k = 0; k < n; k++) {
+            ar_strlcpy(G.sugg[k].user, emoji_table[idx[k]].code, sizeof(G.sugg[0].user));
+            G.sugg[k].name[0] = 0;
+            G.sugg[k].online = G.sugg[k].recent = 0;
+            G.sugg[k].emoji = idx[k];
+            G.n_sugg++;
+        }
+        if (G.sugg_sel >= G.n_sugg || G.n_sugg != old)
+            G.sugg_sel = 0;
+        if (G.n_sugg || old)
+            mark_dirty(DIRTY_CHAT);
+        return;
+    }
+    G.sugg_kind = 0;
     buf_init(&pre);
     buf_append(&pre, (const char *)txt + at, (size_t)(pos - (ULONG)at));
     {   /* the prefix as UTF-8 for matching */
@@ -755,6 +853,10 @@ static void update_suggestions(void)
     add_sugg("here", "notify active users", 0, 0, buf_str(&pre));
     add_sugg("all", "notify everyone", 0, 0, buf_str(&pre));
     buf_free(&pre);
+    if (G.sugg_sel >= G.n_sugg)
+        G.sugg_sel = 0;
+    if (G.n_sugg != old)
+        G.sugg_sel = 0;
     if (G.n_sugg || old)
         mark_dirty(DIRTY_CHAT);
 }
@@ -778,9 +880,15 @@ static void complete_suggestion(int i)
     buf_init(&u);
     utf8_to_latin1(&u, G.sugg[i].user, 0);
     buf_append(&b, txt, (size_t)G.sugg_at);
-    buf_putc(&b, '@');
-    buf_puts(&b, buf_str(&u));
-    buf_putc(&b, ' ');
+    if (G.sugg_kind == 1) {
+        buf_putc(&b, ':');
+        buf_puts(&b, buf_str(&u));
+        buf_puts(&b, ": ");
+    } else {
+        buf_putc(&b, '@');
+        buf_puts(&b, buf_str(&u));
+        buf_putc(&b, ' ');
+    }
     {
         int cursor = (int)b.len;
         buf_puts(&b, (const char *)txt + G.sugg_end);
@@ -1358,7 +1466,7 @@ static void handle_main(void)
             }
             case G_INPUT:
                 if (G.n_sugg && (code == 9 || code == 13 || code == 10 || code == 0))
-                    complete_suggestion(0);   /* Return/Tab: take the top match */
+                    complete_suggestion(G.sugg_sel);   /* Return/Tab: take the selected match */
                 else if (code != 9 && code != 0x5F)   /* not Tab / Help */
                     cmd_send_input();
                 break;
@@ -1559,6 +1667,14 @@ static LONG pen_rgb(ULONG rgb)
     return pen >= 0 ? pen : 1;
 }
 
+static void alloc_emoji_pens(void)
+{
+    int i;
+    G.pens.emoji[0] = G.pens.bg;
+    for (i = 1; i < EMOJI_COLOURS; i++)
+        G.pens.emoji[i] = pen_rgb(emoji_palette[i]);
+}
+
 static void alloc_pens(void)
 {
     const Theme *t = theme_get(theme_find(G.prefs.theme));
@@ -1588,6 +1704,7 @@ static void alloc_pens(void)
         p->avatar[3] = pen_rgb(0xD49A3A);
         p->avatar[4] = pen_rgb(0x8A5AC4);
         p->avatar[5] = pen_rgb(0x3AA6A6);
+        alloc_emoji_pens();
         return;
     }
     p->bg = pen_rgb(t->rgb[TC_BG]);
@@ -1608,6 +1725,7 @@ static void alloc_pens(void)
     p->avatar[3] = pen_rgb(t->rgb[TC_EXTRA4]);
     p->avatar[4] = pen_rgb(t->rgb[TC_EXTRA5]);
     p->avatar[5] = pen_rgb(t->rgb[TC_EXTRA6]);
+    alloc_emoji_pens();
 }
 
 static void free_pens(void)
@@ -1644,6 +1762,8 @@ static int open_main(void)
     G.render_hook.h_SubEntry = (HOOKFUNC)render_hook_func;
     G.idcmp_hook.h_Entry = (HOOKFUNC)HookEntry;
     G.idcmp_hook.h_SubEntry = (HOOKFUNC)idcmp_hook_func;
+    G.edit_hook.h_Entry = (HOOKFUNC)HookEntry;
+    G.edit_hook.h_SubEntry = (HOOKFUNC)edit_hook_func;
 
     root = G.g[0] = VLayoutObject,
         LAYOUT_SpaceOuter, FALSE,
@@ -1699,7 +1819,7 @@ static int open_main(void)
                         GA_ID, G_INPUT,
                         GA_RelVerify, TRUE,
                         STRINGA_MaxChars, INPUT_MAX,
-                        ICA_TARGET, ICTARGET_IDCMP,   /* every keystroke: @ suggestions */
+                        STRINGA_EditHook, (ULONG)&G.edit_hook,   /* every keystroke: suggestions */
                     End,
                     LAYOUT_AddChild, G.g[G_SEND] = ButtonObject,
                         GA_ID, G_SEND,
@@ -1860,6 +1980,7 @@ int gui_run(void)
             GetAttr(WINDOW_SigMask, G.win_obj, &wsig);
         if (G.lwin_obj)
             GetAttr(WINDOW_SigMask, G.lwin_obj, &lsig);
+        input_events();
         if (G.dirty)
             redraw_dirty();
         sigs = Wait(wsig | lsig | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C |

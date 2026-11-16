@@ -1,36 +1,26 @@
 #include "mdtext.h"
+#include "emoji.h"
 
 #include <string.h>
 
-static const struct { const char *code, *text; } shortcodes[] = {
-    { "smile", ":)" }, { "slight_smile", ":)" }, { "smiley", ":)" }, { "blush", ":)" },
-    { "grin", ":D" }, { "grinning", ":D" }, { "joy", ":'D" }, { "laughing", "XD" },
-    { "rofl", "XD" }, { "sweat_smile", ":D" }, { "wink", ";)" }, { "innocent", "O:)" },
-    { "stuck_out_tongue", ":P" }, { "stuck_out_tongue_winking_eye", ";P" }, { "yum", ":P" },
-    { "sunglasses", "B)" }, { "neutral_face", ":|" }, { "confused", ":/" },
-    { "slight_frown", ":(" }, { "frowning", ":(" }, { "disappointed", ":(" },
-    { "cry", ":'(" }, { "sob", ":'(" }, { "rage", ">:(" }, { "angry", ">:(" },
-    { "open_mouth", ":O" }, { "scream", ":O" }, { "kissing_heart", ":*" },
-    { "heart_eyes", "<3" }, { "heart", "<3" }, { "thinking", ":-?" },
-    { "thumbsup", "(y)" }, { "+1", "(y)" }, { "thumbsdown", "(n)" }, { "-1", "(n)" },
-    { "ok_hand", "(ok)" }, { "clap", "(clap)" }, { "pray", "(pray)" }, { "muscle", "(strong)" },
-    { "wave", "o/" }, { "tada", "\\o/" }, { "fire", "(fire)" }, { "rocket", "(rocket)" },
-    { "eyes", "(eyes)" }, { "shrug", "(shrug)" }, { "facepalm", "(facepalm)" },
-    { "white_check_mark", "(v)" }, { "heavy_check_mark", "v" }, { "x", "x" },
-    { "rolling_eyes", "(rolleyes)" }, { "upside_down", "(:" }, { "poop", "(poo)" },
-    { "champagne_glass", "(cheers)" }, { "clinking_glass", "(cheers)" }, { "beers", "(cheers)" },
-    { "beer", "(beer)" }, { "coffee", "(coffee)" }, { "partying_face", "\\o/" },
-    { "100", "(100)" }, { "star", "*" }, { "star_struck", "*_*" }, { "hugging", "(hug)" },
-    { NULL, NULL }
-};
+/* Appends the UTF-8 encoding of a code point. */
+static void put_cp(Buf *out, unsigned long cp)
+{
+    char t[4];
+    size_t n;
+    if (cp < 0x80) { t[0] = (char)cp; n = 1; }
+    else if (cp < 0x800) { t[0] = (char)(0xC0 | (cp >> 6)); t[1] = (char)(0x80 | (cp & 0x3F)); n = 2; }
+    else if (cp < 0x10000) { t[0] = (char)(0xE0 | (cp >> 12)); t[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                             t[2] = (char)(0x80 | (cp & 0x3F)); n = 3; }
+    else { t[0] = (char)(0xF0 | (cp >> 18)); t[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+           t[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); t[3] = (char)(0x80 | (cp & 0x3F)); n = 4; }
+    buf_append(out, t, n);
+}
 
 const char *md_emoticon(const char *code)
 {
-    int k;
-    for (k = 0; shortcodes[k].code; k++)
-        if (!strcmp(shortcodes[k].code, code))
-            return shortcodes[k].text;
-    return NULL;
+    int e = emoji_by_code(code, strlen(code));
+    return e >= 0 ? emoji_table[e].fallback : NULL;
 }
 
 static int is_word(unsigned char c)
@@ -87,13 +77,11 @@ static int shortcode(Buf *out, const char *s, size_t n, size_t i, size_t *used)
         j++;
     if (j >= n || s[j] != ':' || j == i + 1)
         return 0;
-    for (k = 0; shortcodes[k].code; k++) {
-        size_t cl = strlen(shortcodes[k].code);
-        if (cl == j - i - 1 && !memcmp(s + i + 1, shortcodes[k].code, cl)) {
-            buf_puts(out, shortcodes[k].text);
-            *used = j - i + 1;
-            return 1;
-        }
+    k = (size_t)emoji_by_code(s + i + 1, j - i - 1);
+    if ((int)k >= 0) {
+        put_cp(out, emoji_table[k].cp);   /* becomes an image or emoticon later */
+        *used = j - i + 1;
+        return 1;
     }
     return 0;
 }

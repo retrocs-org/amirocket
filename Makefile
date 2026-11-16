@@ -37,13 +37,19 @@ HOST_CORE := $(CORE_SRC) src/posix/mem_posix.c src/posix/net_posix.c
 
 AMIGA_OBJ := $(patsubst %.c,build/amiga/obj/%.o,$(AMIGA_SRC))
 
-.PHONY: all amiga host test clean release install-builds qa-selftest qa-probe icon
+.PHONY: all amiga host test clean release install-builds qa-selftest qa-probe icon emoji
 
 all: amiga
 
 amiga: build/amiga/AmiRocket
 	cp assets/icon/AmiRocket.info build/amiga/AmiRocket.info
 	@if [ -d "$(dir $(BUILDS_DIR))" ]; then mkdir -p "$(BUILDS_DIR)" && cp build/amiga/AmiRocket build/amiga/AmiRocket.info "$(BUILDS_DIR)/" && echo "-> $(BUILDS_DIR)/AmiRocket (+ icon)"; fi
+
+# Regenerates the emoji table and pixel-art bitmaps (needs Pillow); the
+# results are committed.
+emoji:
+	python3 tools/emoji/gen_table.py src/core/emoji_table.c
+	python3 tools/emoji/draw_emoji.py src/amiga/emoji_data.c assets/emoji-preview.png
 
 # Regenerates the Workbench icon from tools/icon (needs Pillow); the result
 # is committed, so normal builds do not need Python.

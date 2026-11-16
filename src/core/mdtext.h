@@ -8,7 +8,7 @@
  *   *bold* _italic_ ~strike~ (and doubled forms)   markers removed
  *   [text](url)         "text (url)", or just the url when they match
  *   # Heading           hashes removed
- *   :shortcode:         common emoji as emoticons, others kept as typed
+ *   :shortcode:         known emoji become their Unicode character, others stay
  * Input and output are UTF-8.
  */
 #ifndef AR_MDTEXT_H
