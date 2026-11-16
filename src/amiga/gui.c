@@ -372,7 +372,8 @@ static void rooms_rebuild(void)
             room_label(&b, r, 1);
             n = AllocListBrowserNode(1,
                                      LBNA_Generation, 2,
-                                     LBNA_Flags, G.collapsed[s] ? LBFLG_HIDDEN : 0,
+                                     LBNA_Flags, (G.collapsed[s] ? LBFLG_HIDDEN : 0) |
+                                                 ((r->unread || r->alert) ? LBFLG_CUSTOMPENS : 0),
                                      LBNA_UserData, (ULONG)r->rid,
                                      LBNA_Column, 0,
                                      LBNCA_CopyText, TRUE,
@@ -406,6 +407,7 @@ static struct ColumnInfo g_msg_cols[] = {
 static int add_row(const char *text, int pen)
 {
     struct Node *n = AllocListBrowserNode(2,
+        LBNA_Flags, pen >= 0 ? LBFLG_CUSTOMPENS : 0,   /* FGPen is ignored without it */
         LBNA_Column, 0,
             LBNCA_CopyText, TRUE,
             LBNCA_Text, (ULONG)"",
