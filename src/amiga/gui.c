@@ -140,6 +140,8 @@ typedef struct {
     int      n_obtained;
     struct Hook render_hook, idcmp_hook, edit_hook;
     volatile int input_changed;   /* set by the string edit hook */
+    char     hook_buf[INPUT_MAX + 1];  /* input text as of the last key */
+    volatile int hook_pos;        /* cursor position as of the last key */
     volatile int sugg_move;       /* arrow keys while the panel is open */
     volatile int sugg_close;      /* Esc */
     int      sugg_sel;
@@ -585,6 +587,18 @@ static ULONG edit_hook_func(struct Hook *h, struct SGWork *sgw, ULONG *msg)
 {
     if (*msg != SGH_KEY)
         return 0;
+    /* string.gadget cannot report the cursor position (STRINGA_BufferPos
+     * is not gettable on OS 3.x), so keep our own copy of text and cursor */
+    if (sgw->WorkBuffer) {
+        int n = sgw->NumChars;
+        if (n < 0)
+            n = 0;
+        if (n > INPUT_MAX)
+            n = INPUT_MAX;
+        memcpy(G.hook_buf, sgw->WorkBuffer, (size_t)n);
+        G.hook_buf[n] = 0;
+        G.hook_pos = sgw->BufferPos > n ? n : sgw->BufferPos;
+    }
     if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY && G.n_sugg) {
         UWORD code = sgw->IEvent->ie_Code;
         if (code == 0x4C)            /* cursor up */
@@ -765,12 +779,8 @@ static void update_suggestions(void)
         hide_suggestions();
         return;
     }
-    GetAttr(STRINGA_TextVal, G.g[G_INPUT], (ULONG *)&txt);
-    GetAttr(STRINGA_BufferPos, G.g[G_INPUT], &pos);
-    if (!txt) {
-        hide_suggestions();
-        return;
-    }
+    txt = (STRPTR)G.hook_buf;
+    pos = (ULONG)G.hook_pos;
     if (pos > strlen((char *)txt))
         pos = (ULONG)strlen((char *)txt);
     at = (int)pos;
@@ -870,9 +880,7 @@ static void complete_suggestion(int i)
 
     if (i < 0 || i >= G.n_sugg)
         return;
-    GetAttr(STRINGA_TextVal, G.g[G_INPUT], (ULONG *)&txt);
-    if (!txt)
-        return;
+    txt = (STRPTR)G.hook_buf;
     len = (int)strlen((char *)txt);
     if (G.sugg_at < 0 || G.sugg_at > len || G.sugg_end > len || G.sugg_end < G.sugg_at)
         return;
@@ -895,6 +903,8 @@ static void complete_suggestion(int i)
         SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL,
                        STRINGA_TextVal, (ULONG)buf_str(&b),
                        STRINGA_BufferPos, (ULONG)cursor, TAG_END);
+        ar_strlcpy(G.hook_buf, buf_str(&b), sizeof(G.hook_buf));
+        G.hook_pos = cursor;
     }
     buf_free(&b);
     buf_free(&u);
@@ -1019,6 +1029,8 @@ static void cmd_send_input(void)
     m->a_text = t;
     send_cmd(m);
     SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL, STRINGA_TextVal, (ULONG)"", TAG_END);
+    G.hook_buf[0] = 0;
+    G.hook_pos = 0;
     hide_suggestions();
     ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
 }
