@@ -20,8 +20,8 @@ remain together in its AmiRocket drawer. Close both before updating.
 
 Updates preserve ENVARC:AmiRocket.prefs, custom icons and unrelated plugins.
 The installer never imports account settings from a distribution archive.
-You may choose a Workbench startup entry. Existing per-server auto-connect
-preferences decide which servers connect; installation does not change them.
+Launch AmiRocket from its Workbench icon. Per-server auto-connect preferences
+decide which servers connect when the client starts.
 
 Shell installation: CD to the extracted AmiRocket drawer, then execute:
  Execute scripts/Install-AmiRocket DEST=SYS:Utilities/AmiRocket
@@ -69,12 +69,15 @@ AmiRocketMonitor. Ctrl-C exits. Rexx/ contains ready-to-adapt scripts.
 A real NovaDock widget still needs its own integration and rendering tests.
 @ENDNODE
 @NODE REMOVE "Uninstall"
-From an extracted release drawer, double-click Install, choose Uninstall and
-select the parent of the installed AmiRocket drawer. The installer removes
-only its known managed files and owned Workbench startup entry.
+From an extracted release drawer, double-click Install and select the parent
+of the installed AmiRocket drawer. An existing copy offers Update or Uninstall.
+Uninstall then offers Keep settings (default) or Remove settings. The installer removes
+only its known managed files and any owned startup entry from older installers.
 
-ENVARC:AmiRocket.prefs and any unrelated files/plugins are kept. The drawer may
-remain when custom files are present. To forget accounts, use Log out and
+Keep settings preserves ENVARC:AmiRocket.prefs. Remove settings deletes this
+shared file and the old ENV fallback, including all saved server tokens and
+plugin options for every installation. Unrelated files/plugins are always kept.
+The drawer may remain when custom files are present. To forget accounts, use Log out and
 forget login before uninstalling. You may remove the saved configuration
 manually if you no longer want it. Updates never delete this file.
 @ENDNODE

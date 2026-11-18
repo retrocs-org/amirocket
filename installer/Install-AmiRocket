@@ -61,5 +61,5 @@ Copy "Rexx/status.rexx" TO "{DEST}/Rexx/status.rexx" CLONE
 Copy "VERSION" TO "{DEST}/VERSION" CLONE
 Copy "licenses/Beam68-release-tools.txt" TO "{DEST}/licenses/Beam68-release-tools.txt" CLONE
 Copy "scripts/Install-AmiRocket" TO "{DEST}/scripts/Install-AmiRocket" CLONE
-"CreateIcons" "{DEST}" NOSTARTUP
+"CreateIcons" "{DEST}" ICONS
 Echo "AmiRocket installed. Settings preserved."

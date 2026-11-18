@@ -3,10 +3,18 @@
 The release workflow is adapted from Beam68. Build once, inspect the manifest,
 and publish the same verified bytes. Local commands do not upload or create tags.
 
+Git tags use the plain version (`0.1`). Release titles include the application
+name (`AmiRocket 0.1`), matching the NovaDock release presentation.
+The tag annotation is `AmiRocket 0.1`. GitHub and GitLab receive identical
+change-only notes from the current CHANGELOG section under exactly these headings,
+in order: `### Features`, `### Enhancements`, `### Bugs`. No other sections are
+allowed; no overview, installation,
+licence or download instructions are appended to the release body.
+
 ## Local build
 
 Set `VERSION`, add the matching `CHANGELOG.md` entry and put its complete notes in
-`docs/RELEASE-NOTES.md` (heading levels are promoted by one in the notes file).
+`docs/RELEASE-NOTES.md` (keep the same heading levels in both files).
 Run `python3 -B scripts/make-installer.py` when the runtime inventory changes.
 Workbench installer/guide icons can be regenerated with
 `python3 -B scripts/generate_info_icons.py`.
@@ -76,8 +84,8 @@ tracked. If destinations/notes/source/artifacts change, rebuild or prepare again
 as appropriate. The command refuses conflicting existing release assets/tags.
 
 ```
-python3 -B scripts/release.py prepare --tag v0.1
-python3 -B scripts/release.py publish --tag v0.1 --to github,gitlab --confirm-publish
+python3 -B scripts/release.py prepare --tag 0.1
+python3 -B scripts/release.py publish --tag 0.1 --to github,gitlab --confirm-publish
 ```
 
 GitHub uploads are verified while draft, then published; GitLab package bytes are
@@ -98,10 +106,13 @@ also stages manual submission files from a verified build.
 
 Install/update is destination-selected and preserves the single
 `ENVARC:AmiRocket.prefs` file, customized icons and third-party plugins. No personal
-configuration is shipped. Startup is opt-in; helpers preserve unrelated startup
-entries. The Preferences executable stays beside the client so PROGDIR-based
+configuration is shipped. Installation creates application/drawer icons only;
+there is no autostart prompt or Workbench startup registration. The Preferences executable stays beside the client so PROGDIR-based
 plugins/helpers keep working. Uninstall removes only the declared runtime files
-and its owned startup entry; settings and unrelated files remain.
+and any owned startup entry from older installers. Existing copies offer Update
+or Uninstall. Uninstall defaults to Keep settings; Remove settings explicitly
+deletes the shared ENVARC:AmiRocket.prefs and old ENV fallback for all installations.
+Custom plugins and unrelated files remain in either mode.
 
 ## Licence
 

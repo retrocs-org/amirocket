@@ -150,6 +150,17 @@ class ReleaseTests(unittest.TestCase):
         a=self.root/'a.zip';b=self.root/'b.zip';zip_write(a,[('a',b'abc',False)]);zip_write(b,[('a',b'abc',False)]);self.assertEqual(a.read_bytes(),b.read_bytes())
     def test_release_notes_cannot_be_partial_or_stale(self):
         with self.assertRaises(ReleaseError):rel.validate_release_notes(self.root,'0.1','Incomplete notes')
+        notes=(self.root/'docs/RELEASE-NOTES.md').read_text().strip()
+        rel.validate_release_notes(self.root,'0.1',notes)
+        with self.assertRaises(ReleaseError):rel.validate_release_notes(self.root,'0.1',notes+'\n\n## Installation\nUnpack the archive.')
+    def test_release_notes_require_exact_three_sections(self):
+        notes=(self.root/'docs/RELEASE-NOTES.md').read_text().strip()
+        self.assertEqual(re.findall(r'^#{1,6}[^\n]*',notes,re.M),['### Features','### Enhancements','### Bugs'])
+        for bad in (notes.replace('### Bugs','### Fixed'), notes.replace('### Features','## Features'),
+                    notes+'\n\n### Installation\n- Unpack.', 'Overview\n\n'+notes):
+            (self.root/'CHANGELOG.md').write_text('# Changelog\n\n## 0.1\n\n'+bad+'\n')
+            with self.assertRaises(ReleaseError):rel.validate_release_notes(self.root,'0.1',bad)
+
     def test_config_destination_and_build_env_validation(self):
         path=self.root/'settings.json';path.write_text(json.dumps({'env':{'GITHUB_TOKEN':'not-allowed'}}))
         with self.assertRaises(ReleaseError):rel.config_read(self.root,path)
@@ -160,14 +171,14 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ReleaseError):self.tool.manifest_check()
     def test_github_publishes_only_after_upload_verification(self):
         m=self.manifest();api=GithubAPI();adapter=rel.GitHub(m,self.tool.state/'publish/outputs',api=api)
-        adapter.preflight();adapter.publish();self.assertFalse(api.r['draft']);self.assertEqual(len(api.assets),6)
+        adapter.preflight();adapter.publish();self.assertFalse(api.r['draft']);self.assertEqual(len(api.assets),6);self.assertEqual(api.r['name'],'AmiRocket 0.1');self.assertEqual(api.r['tag_name'],'0.1');self.assertEqual(api.r['body'],m['notes'])
     def test_github_wrong_hash_keeps_draft(self):
         m=self.manifest();api=GithubAPI();api.bad_digest=True
         with self.assertRaises(ReleaseError):rel.GitHub(m,self.tool.state/'publish/outputs',api=api).publish()
         self.assertTrue(api.r['draft'])
     def test_gitlab_checks_package_bytes_before_advertising(self):
         m=self.manifest();api=GitlabAPI(m['gitlab']);adapter=rel.GitLab(m,self.tool.state/'publish/outputs',api=api)
-        adapter.preflight();adapter.publish();self.assertEqual(len(api.r['assets']['links']),6)
+        adapter.preflight();adapter.publish();self.assertEqual(len(api.r['assets']['links']),6);self.assertEqual(api.r['name'],'AmiRocket 0.1');self.assertEqual(api.r['tag_name'],'0.1');self.assertEqual(api.r['description'],m['notes'])
     def test_gitlab_corruption_never_creates_release(self):
         m=self.manifest();api=GitlabAPI(m['gitlab']);api.corrupt=True
         with self.assertRaises(ReleaseError):rel.GitLab(m,self.tool.state/'publish/outputs',api=api).publish()
@@ -189,7 +200,17 @@ class ReleaseTests(unittest.TestCase):
                 elif token==')':depth-=1;self.assertGreaterEqual(depth,0)
             self.assertEqual(depth,0)
             self.assertNotRegex(text,r'\(delete[^\n]*ENVARC:')
-        self.assertIn('NOSTARTUP',mod.render());self.assertIn('REMOVE-STARTUP',mod.render())
+        self.assertIn('(choices "Update AmiRocket" "Uninstall AmiRocket")',mod.render())
+        self.assertIn('(choices "Keep settings" "Remove settings") (default 0)',mod.render())
+        self.assertIn('(set #remove-settings 0)',mod.render(qa=True,uninstall=True))
+        self.assertIn('(set #remove-settings 1)',mod.render(qa=True,uninstall=True,remove_settings=True))
+        self.assertIn('(set #prefs "RAM:',mod.render(qa=True,uninstall=True,remove_settings=True))
+        self.assertIn('(if (= #remove-settings 1) (',mod.render())
+        self.assertIn('ICONS',mod.render());self.assertIn('REMOVE-STARTUP',mod.render())
+        self.assertNotIn('#startup',mod.render())
+        self.assertNotIn('Start AmiRocket automatically',mod.render())
+        self.assertNotIn(' NOSTARTUP',mod.shell())
+        self.assertNotIn(' STARTUP',mod.render())
     def test_aminet_receipt_records_submission_and_does_not_repeat(self):
         m=self.manifest();folder=self.tool.state/'aminet-fixture';folder.mkdir()
         (folder/'AmiRocket.lha').write_bytes(b'fixture');(folder/'AmiRocket.readme').write_bytes(b'contact')

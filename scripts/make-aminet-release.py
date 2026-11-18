@@ -25,8 +25,9 @@ INSTALLATION
 Unpack {archive_name}, open the AmiRocket drawer and double-click Install.
 Choose install/update and the parent drawer. AmiRocketPrefs stays beside
 the client. Existing ENVARC:AmiRocket.prefs and custom plugins are preserved.
-Workbench startup is optional. Close the client and Preferences before updating.
-The uninstaller removes only managed files and keeps configuration/custom files.
+Launch the client from Workbench. Close the client and Preferences before updating.
+Existing copies offer Update or Uninstall. Uninstall lets you keep settings
+(default) or remove the shared configuration. Custom files/plugins are kept.
 Read AmiRocket.guide for usage, dependencies and removal instructions.
 
 LICENCE AND SOURCE

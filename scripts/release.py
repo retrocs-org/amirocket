@@ -36,11 +36,15 @@ def changelog_notes(root, version):
     match = re.search(r'^## '+re.escape(version)+r'(?:[^\n]*)\n(.*?)(?=^## |\Z)',
                       changelog, re.M | re.S)
     need(match is not None, 'Missing version in CHANGELOG.md: '+version)
-    return re.sub(r'^### ', '## ', match.group(1).strip(), flags=re.M)
+    return match.group(1).strip()
 
 
 def validate_release_notes(root, version, text):
-    """Repository release descriptions contain the complete changelog only."""
+    """Only the matching changes under the three required release headings."""
+    headings = re.findall(r'^#{1,6}[^\n]*', text, re.M)
+    need(headings == ['### Features', '### Enhancements', '### Bugs']
+         and text.strip().startswith('### Features\n'),
+         'Release notes require only ### Features, ### Enhancements, ### Bugs in that order')
     need(not re.search(r'\b(in development|unreleased|TODO|TBD)\b', text, re.I),
          'Release notes contain development placeholders')
     need(' '.join(text.split()) == ' '.join(changelog_notes(root, version).split()),
@@ -787,7 +791,7 @@ class Release:
         validate_release_notes(self.root, self.version, text)
         need(not any(token and token in text for token in (os.environ.get(x) for x in SECRET_ENV)), 'Release notes contain a credential')
         manifest = {'schema': 1, 'version': self.version, 'tag': self.tag, 'source_sha256': fingerprint(self.inputs()),
-                    'tag_message': self.tag_message, 'commit': commit(self.root), 'build_sha256': sha(self.record), 'notes': text, 'files': files, 'aminet_files': self.aminet_files(),
+                    'tag_message': self.tag_message, 'title': 'AmiRocket '+self.version, 'commit': commit(self.root), 'build_sha256': sha(self.record), 'notes': text, 'files': files, 'aminet_files': self.aminet_files(),
                     **self.binding()}
         if self.manifest.exists() and load(self.manifest) != manifest:
             need(not (self.state / 'receipt.json').exists() and not (self.state / 'aminet-receipt.json').exists(),
@@ -823,7 +827,7 @@ class Release:
         m = load(self.manifest)
         need(m.get('files') == self.check() and m.get('build_sha256') == sha(self.record) and
              m.get('source_sha256') == fingerprint(self.inputs()) and m.get('version') == self.version and
-             m.get('tag') == self.tag and m.get('tag_message') == self.tag_message, 'Prepared manifest is stale; prepare again')
+             m.get('tag') == self.tag and m.get('title') == 'AmiRocket '+self.version and m.get('tag_message') == self.tag_message, 'Prepared manifest is stale; prepare again')
         need(all(m.get(k) == v for k, v in self.binding().items()), 'Prepared destinations changed')
         need(m.get('commit') == clean_checkout(self.root, self.inputs()), 'Prepared commit differs; prepare again')
         need(isinstance(m.get('notes'), str) and m['notes'], 'Missing prepared notes')

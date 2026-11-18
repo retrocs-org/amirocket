@@ -36,27 +36,19 @@ static int icon(const char *name,int type)
 }
 int main(int argc,char **argv)
 {
-    char app[512],prefs[512]; int ok=0; struct DiskObject *d; BPTR f;
+    char app[512],prefs[512]; int ok=0; struct DiskObject *d;
     if(argc==2 && same(argv[1],"CHECK")) return running()?5:0;
     if(argc<2 || argc>3 || strlen(argv[1])>400 || !strchr(argv[1],':') || strpbrk(argv[1],"\"*\r\n")) return 20;
     snprintf(app,sizeof(app),"%s/AmiRocket",argv[1]); snprintf(prefs,sizeof(prefs),"%s/AmiRocketPrefs",argv[1]);
     IconBase=OpenLibrary("icon.library",39); if(!IconBase)return 20;
-    if(!icon(argv[1],WBDRAWER)||!icon(app,WBTOOL)||!icon(prefs,WBTOOL))goto done;
-    if(argc==3 && same(argv[2],"STARTUP")) {
-        const char *name="SYS:WBStartup/AmiRocketStart"; STRPTR original; STRPTR types[]={(STRPTR)"DONOTWAIT",NULL}; STRPTR *oldtypes;
-        d=GetDiskObject((STRPTR)name);
-        if(d && !same(d->do_DefaultTool,app)) { FreeDiskObject(d); goto done; }
-        if(!d) { BPTR old=Lock((STRPTR)name,ACCESS_READ); if(old) { UnLock(old); goto done; } }
-        if(!d)d=GetDefDiskObject(WBPROJECT);
-        if(!d)goto done;
-        f=Open((STRPTR)name,MODE_OLDFILE); if(f)Close(f); else { f=Open((STRPTR)name,MODE_NEWFILE);if(!f){FreeDiskObject(d);goto done;}Close(f); }
-        original=d->do_DefaultTool;oldtypes=d->do_ToolTypes;d->do_Type=WBPROJECT;d->do_DefaultTool=app;d->do_ToolTypes=types;d->do_StackSize=65536;
-        ok=PutDiskObject((STRPTR)name,d)!=0;d->do_DefaultTool=original;d->do_ToolTypes=oldtypes;FreeDiskObject(d);
-    } else if(argc==3 && (same(argv[2],"REMOVE-STARTUP")||same(argv[2],"NOSTARTUP"))) {
+    if(argc==3 && same(argv[2],"REMOVE-STARTUP")) {
+        /* Cleanup only for entries made by older installers. Never create one. */
         const char *name="SYS:WBStartup/AmiRocketStart";
         d=GetDiskObject((STRPTR)name);ok=1;
         if(d) { if(same(d->do_DefaultTool,app)) { ok=DeleteDiskObject((STRPTR)name)!=0; if(ok)DeleteFile((STRPTR)name); } FreeDiskObject(d); }
-    } else ok=argc==2 || (argc==3 && same(argv[2],"NOSTARTUP"));
-done:
+    } else if(argc==2 || (argc==3 && same(argv[2],"ICONS"))) {
+        ok=icon(argv[1],WBDRAWER)&&icon(app,WBTOOL)&&icon(prefs,WBTOOL);
+    }
+
     CloseLibrary(IconBase);return ok?0:20;
 }

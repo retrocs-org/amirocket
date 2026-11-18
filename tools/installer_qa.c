@@ -77,14 +77,16 @@ static int checks(void)
     puts("Installer QA: clean install / update / uninstall");fflush(stdout);
     IntuitionBase=(struct IntuitionBase *)OpenLibrary("intuition.library",39);
     root=CreateDir("RAM:AmiRocketInstallerQA");if(root)UnLock(root);
-    if(!exists("ENVARC:AmiRocket.prefs"))QA(write_text("ENVARC:AmiRocket.prefs","workspace.installer_test=keep\nplugin.private.option=keep\n"));
-    prefs_hash=file_hash("ENVARC:AmiRocket.prefs");QA(prefs_hash!=0);
+    root=CreateDir("RAM:AmiRocketInstallerQA/settings");if(root)UnLock(root);
+    if(!exists("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs"))QA(write_text("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs","workspace.installer_test=keep\nplugin.private.option=keep\n"));
+    QA(write_text("RAM:AmiRocketInstallerQA/settings/volatile.prefs","old fallback"));
+    prefs_hash=file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs");QA(prefs_hash!=0);
     if(!run_installer("InstallTest")){puts("Initial Installer run did not complete; remaining checks skipped.");return 5;}
     QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket"));
     QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket")==file_hash("AmiRocket:AmiRocket"));
     QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocketPrefs")==file_hash("AmiRocket:AmiRocketPrefs"));
     QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/timestamp.arp")==file_hash("AmiRocket:Plugins/timestamp.arp"));
-    QA(file_hash("ENVARC:AmiRocket.prefs")==prefs_hash);
+    QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
     QA(write_text("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/Custom.arp","keep this plugin"));
     QA(write_text("RAM:AmiRocketInstallerQA/AmiRocket/user-note.txt","keep this file"));
     IconBase=OpenLibrary("icon.library",39);QA(IconBase!=NULL);
@@ -94,7 +96,7 @@ static int checks(void)
     puts("Installer QA: update with a Workbench drawer lock and custom files");fflush(stdout);
     QA(run_installer("InstallTest"));
     QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket")==file_hash("AmiRocket:AmiRocket"));
-    QA(file_hash("ENVARC:AmiRocket.prefs")==prefs_hash);
+    QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
     if(IconBase) { icon=GetDiskObject("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket");QA(icon&&icon->do_CurrentX==121);if(icon)FreeDiskObject(icon); }
     if(held)UnLock(held);
     puts("Installer QA: uninstall keeps settings and unrelated plugins");fflush(stdout);
@@ -102,7 +104,17 @@ static int checks(void)
     QA(!exists("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket"));
     QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/Custom.arp"));
     QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/user-note.txt"));
-    QA(file_hash("ENVARC:AmiRocket.prefs")==prefs_hash);
+    QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
+    QA(exists("RAM:AmiRocketInstallerQA/settings/volatile.prefs"));
+    puts("Installer QA: reinstall, then uninstall with settings removal");fflush(stdout);
+    QA(run_installer("InstallTest"));
+    QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
+    QA(run_installer("UninstallRemoveTest"));
+    QA(!exists("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket"));
+    QA(!exists("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs"));
+    QA(!exists("RAM:AmiRocketInstallerQA/settings/volatile.prefs"));
+    QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/Custom.arp"));
+    QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/user-note.txt"));
     if(IconBase)CloseLibrary(IconBase);
     if(IntuitionBase)CloseLibrary((struct Library *)IntuitionBase);
     printf("Installer checks: %d passed, %d failed\n",passed,failed);return failed?5:0;
