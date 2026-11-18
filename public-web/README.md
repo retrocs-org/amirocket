@@ -31,9 +31,9 @@ A previous successful catalogue remains available during outages. PHP needs cURL
 or HTTPS URL streams plus a writable system temporary directory for refreshes.
 
 Only non-draft releases with valid version tags/asset names are displayed.
-Download URLs must exactly match assets in this GitHub repository. Runtime LHA,
+Download URLs must exactly match fully uploaded, non-empty assets in this GitHub repository. Runtime LHA,
 SDK ZIP, source ZIP and runtime checksum links come from the API; absent assets
-stay unavailable. Published prereleases are labelled as previews. No download
+stay unavailable. Published prereleases are labelled as previews. Runtime, SDK and source download counts and file sizes come from each GitHub asset and refresh every 15 minutes. Counts measure asset downloads, not unique users or installations. Missing counts are omitted rather than invented; a reported zero is shown as zero. No download
 URLs are guessed, and no local application archives are served.
 
 `releases.json` is an empty optional offline fallback until a release is published.

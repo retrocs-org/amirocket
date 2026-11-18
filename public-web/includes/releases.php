@@ -2,7 +2,7 @@
 /** Adapted from NovaDock (MIT); see licenses/NovaDock.txt.
  * Public GitHub release catalogue, with a bounded anonymous request and disk cache. */
 const AR_RELEASE_REPO = 'https://github.com/retrocs-org/amirocket';
-const AR_RELEASE_CACHE_SCHEMA = 2;
+const AR_RELEASE_CACHE_SCHEMA = 3;
 const AR_RELEASE_API = 'https://api.github.com/repos/retrocs-org/amirocket/releases?per_page=20';
 
 function ar_release_entry(string $tag, string $version): array {
@@ -12,7 +12,7 @@ function ar_release_entry(string $tag, string $version): array {
         'date'=>null, 'published_at'=>'', 'release_url'=>AR_RELEASE_REPO.'/releases/tag/'.$encoded,
         'binary_url'=>null, 'binary_size'=>null, 'binary_download_count'=>null, 'checksums_url'=>null,
         'sdk_url'=>null, 'sdk_size'=>null, 'sdk_download_count'=>null, 'sdk_checksums_url'=>null,
-        'source_url'=>null,
+        'source_url'=>null, 'source_size'=>null, 'source_download_count'=>null,
         'source_tar_url'=>AR_RELEASE_REPO.'/archive/refs/tags/'.$encoded.'.tar.gz'];
 }
 
@@ -43,11 +43,13 @@ function ar_release_normalize(array $record): ?array {
     $base = AR_RELEASE_REPO.'/releases/download/'.rawurlencode($tag).'/';
     foreach (['binary_url'=>'AmiRocket-'.$version.'.lha', 'checksums_url'=>'AmiRocket-'.$version.'.lha.sha256',
               'sdk_url'=>'AmiRocket-'.$version.'-plugin-sdk.zip', 'sdk_checksums_url'=>'AmiRocket-'.$version.'-plugin-sdk.zip.sha256', 'source_url'=>'AmiRocket-'.$version.'-source.zip'] as $key=>$name) {
-        if (($assets[$name]['browser_download_url'] ?? null) !== $base.$name) continue;
+        if (($assets[$name]['browser_download_url'] ?? null) !== $base.$name
+            || ($assets[$name]['state'] ?? '') !== 'uploaded'
+            || !is_int($assets[$name]['size'] ?? null) || $assets[$name]['size'] <= 0) continue;
         $entry[$key] = $base.$name;
         $size = $assets[$name]['size'] ?? null;
-        if (in_array($key, ['binary_url','sdk_url'], true)) {
-            $prefix = $key === 'binary_url' ? 'binary' : 'sdk';
+        if (in_array($key, ['binary_url','sdk_url','source_url'], true)) {
+            $prefix = $key === 'binary_url' ? 'binary' : ($key === 'sdk_url' ? 'sdk' : 'source');
             if (is_int($size) && $size >= 0) $entry[$prefix.'_size'] = $size;
             $count = $assets[$name]['download_count'] ?? null;
             if (is_int($count) && $count >= 0) $entry[$prefix.'_download_count'] = $count;
@@ -71,7 +73,7 @@ function ar_release_saved_entries($records): array {
                   'sdk_url'=>'AmiRocket-'.$record['version'].'-plugin-sdk.zip', 'sdk_checksums_url'=>'AmiRocket-'.$record['version'].'-plugin-sdk.zip.sha256', 'source_url'=>'AmiRocket-'.$record['version'].'-source.zip'] as $key=>$name) {
             if (($record[$key] ?? null) === $base.$name) $entry[$key] = $base.$name;
         }
-        foreach (['binary_size','sdk_size','binary_download_count','sdk_download_count'] as $key) if (is_int($record[$key] ?? null) && $record[$key] >= 0) $entry[$key] = $record[$key];
+        foreach (['binary_size','sdk_size','source_size','binary_download_count','sdk_download_count','source_download_count'] as $key) if (is_int($record[$key] ?? null) && $record[$key] >= 0) $entry[$key] = $record[$key];
         $entry['prerelease'] = !empty($record['prerelease']);
         if (is_string($record['date'] ?? null) && preg_match('~^\d{4}-\d{2}-\d{2}$~D', $record['date'])) $entry['date'] = $record['date'];
         $entry['published_at'] = is_string($record['published_at'] ?? null) ? $record['published_at'] : ($entry['date'] ?? '');
@@ -82,7 +84,7 @@ function ar_release_saved_entries($records): array {
 }
 
 function ar_release_fetch(string $etag): ?array {
-    $headers = ['Accept: application/vnd.github+json', 'User-Agent: AmiRocket-website', 'X-GitHub-Api-Version: 2026-03-10'];
+    $headers = ['Accept: application/vnd.github+json', 'User-Agent: AmiRocket-website', 'X-GitHub-Api-Version: 2022-11-28'];
     if ($etag !== '' && strpos($etag, "\r") === false && strpos($etag, "\n") === false) $headers[] = 'If-None-Match: '.$etag;
     $responseHeaders = []; $code = 0; $body = false;
     if (function_exists('curl_init')) {
@@ -178,4 +180,12 @@ function ar_release_size($bytes): string {
 function ar_release_downloads($count): string {
     if (!is_int($count) || $count < 0) return '';
     return number_format($count).' '.($count === 1 ? 'download' : 'downloads').' on GitHub';
+}
+
+/** GitHub counts are per uploaded asset, not unique visitors or installs. */
+function ar_release_asset_meta(array $release, string $prefix): string {
+    $parts = [];
+    if (($size = ar_release_size($release[$prefix.'_size'] ?? null)) !== '') $parts[] = $size;
+    if (($count = ar_release_downloads($release[$prefix.'_download_count'] ?? null)) !== '') $parts[] = $count;
+    return implode(' · ', $parts);
 }
