@@ -1,0 +1,65 @@
+.key DEST/A
+.bra {
+.ket }
+; Install into the full destination drawer; settings are never copied.
+FailAt 10
+"CreateIcons" CHECK
+If WARN
+ Echo "Close AmiRocket before installation."
+ Quit 10
+EndIf
+FailAt 5
+If NOT EXISTS "{DEST}"
+ MakeDir "{DEST}"
+EndIf
+If NOT EXISTS "{DEST}/Plugins"
+ MakeDir "{DEST}/Plugins"
+EndIf
+If NOT EXISTS "{DEST}/Rexx"
+ MakeDir "{DEST}/Rexx"
+EndIf
+If NOT EXISTS "{DEST}/licenses"
+ MakeDir "{DEST}/licenses"
+EndIf
+If NOT EXISTS "{DEST}/scripts"
+ MakeDir "{DEST}/scripts"
+EndIf
+Copy "AmiRocket" TO "{DEST}/AmiRocket" CLONE
+Copy "AmiRocket.guide" TO "{DEST}/AmiRocket.guide" CLONE
+If NOT EXISTS "{DEST}/AmiRocket.guide.info"
+ Copy "AmiRocket.guide.info" TO "{DEST}/AmiRocket.guide.info" CLONE
+EndIf
+If NOT EXISTS "{DEST}/AmiRocket.info"
+ Copy "AmiRocket.info" TO "{DEST}/AmiRocket.info" CLONE
+EndIf
+Copy "AmiRocketMonitor" TO "{DEST}/AmiRocketMonitor" CLONE
+Copy "AmiRocketPrefs" TO "{DEST}/AmiRocketPrefs" CLONE
+If NOT EXISTS "{DEST}/AmiRocketPrefs.info"
+ Copy "AmiRocketPrefs.info" TO "{DEST}/AmiRocketPrefs.info" CLONE
+EndIf
+Copy "BUILD-PROVENANCE.json" TO "{DEST}/BUILD-PROVENANCE.json" CLONE
+Copy "CHANGELOG.md" TO "{DEST}/CHANGELOG.md" CLONE
+Copy "COPYRIGHT" TO "{DEST}/COPYRIGHT" CLONE
+Copy "CreateIcons" TO "{DEST}/CreateIcons" CLONE
+Copy "Install" TO "{DEST}/Install" CLONE
+If NOT EXISTS "{DEST}/Install.info"
+ Copy "Install.info" TO "{DEST}/Install.info" CLONE
+EndIf
+Copy "LICENSE" TO "{DEST}/LICENSE" CLONE
+Copy "Plugins/quickreply.arp" TO "{DEST}/Plugins/quickreply.arp" CLONE
+Copy "Plugins/quickreply.arp.meta" TO "{DEST}/Plugins/quickreply.arp.meta" CLONE
+Copy "Plugins/timestamp.arp" TO "{DEST}/Plugins/timestamp.arp" CLONE
+Copy "Plugins/timestamp.arp.meta" TO "{DEST}/Plugins/timestamp.arp.meta" CLONE
+Copy "README.md" TO "{DEST}/README.md" CLONE
+Copy "ReadMe" TO "{DEST}/ReadMe" CLONE
+Copy "Rexx/connection.rexx" TO "{DEST}/Rexx/connection.rexx" CLONE
+Copy "Rexx/dock-status.rexx" TO "{DEST}/Rexx/dock-status.rexx" CLONE
+Copy "Rexx/low-memory.rexx" TO "{DEST}/Rexx/low-memory.rexx" CLONE
+Copy "Rexx/novadock-toggle.rexx" TO "{DEST}/Rexx/novadock-toggle.rexx" CLONE
+Copy "Rexx/quick-reply.rexx" TO "{DEST}/Rexx/quick-reply.rexx" CLONE
+Copy "Rexx/status.rexx" TO "{DEST}/Rexx/status.rexx" CLONE
+Copy "VERSION" TO "{DEST}/VERSION" CLONE
+Copy "licenses/Beam68-release-tools.txt" TO "{DEST}/licenses/Beam68-release-tools.txt" CLONE
+Copy "scripts/Install-AmiRocket" TO "{DEST}/scripts/Install-AmiRocket" CLONE
+"CreateIcons" "{DEST}" NOSTARTUP
+Echo "AmiRocket installed. Settings preserved."

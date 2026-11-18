@@ -51,4 +51,5 @@ EMOJI = [
     ("coffee", 0x2615, "(coffee)", []),
     ("poop", 0x1F4A9, "(poo)", ["hankey", "shit"]),
     ("partying_face", 0x1F973, "\\o/", []),
+    ("smiling_face_with_3_hearts", 0x1F970, "<3", ["smiling_face_with_hearts", "smiling_face_with_three_hearts"]),
 ]

@@ -207,9 +207,20 @@ def test_flaky_and_chunked():
         check(rc == 0 and len(entries(out)) == 37, "chunked + escaped JSON + dropped connections", out + err)
         check("Hej p\u00c3\u00a5 dig" in out, "\\u escapes decoded", out)
         rc, out, err = rcli(*login_args(m), "send", "general", "after reconnect")
-        check(rc == 0, "send over flaky server", err)
+        check(rc == 0 or "Delivery unconfirmed" in err, "flaky send succeeds or reports uncertain delivery without replay", err)
         st = m.get("/mock/stats")
         check(st["dropped"] > 0 and st["connections"] > 1, "server dropped idle connections", str(st))
+    finally:
+        m.stop()
+
+
+def test_ambiguous_send():
+    m = Mock("--lose-send-reply")
+    try:
+        rc, out, err = rcli(*login_args(m), "send", "general", "one accepted send")
+        check(rc != 0 and "Delivery unconfirmed" in err, "lost send reply reports uncertain delivery", err)
+        rc, out, err = rcli(*login_args(m), "history", "general", "50")
+        check(rc == 0 and out.count("one accepted send") == 1, "accepted send is never replayed after losing its reply", out + err)
     finally:
         m.stop()
 
@@ -251,6 +262,43 @@ def test_tls():
         m.stop()
 
 
+def test_download_and_paging():
+    for prefix in ("", "/chat"):
+        m = Mock(*(["--prefix", prefix] if prefix else []))
+        try:
+            args = login_args(m)
+            if prefix: args[1] += prefix
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "file.png")
+                rc, out, err = rcli(*args, "download", prefix + "/file-upload/x/screenshot.png", path)
+                check(rc == 0 and os.path.exists(path) and open(path, "rb").read() == b"\x89PNG\r\n\x1a\n\x00binary-test", "binary attachment download " + prefix, err)
+                rc, out, err = rcli(*args, "download", prefix + "/file-upload/x/redirect.png", path)
+                check(rc == 0 and open(path, "rb").read() == b"\x89PNG\r\n\x1a\n\x00binary-test", "cookie-protected redirected download " + prefix, err)
+                rc, out, err = rcli(*args, "download", "https://external.invalid/file", path + ".bad")
+                check(rc != 0 and not os.path.exists(path + ".bad"), "external attachment rejected " + prefix, err)
+            rc, out, err = rcli(*args, "history", "general", "2")
+            recent = entries(out)
+            check(rc == 0 and len(recent) == 2, "paging recent page " + prefix, err)
+            if recent:
+                before = recent[0].split()[0]
+                rc, out, err = rcli(*args, "older", "general", before, "50")
+                older = entries(out)
+                check(rc == 0 and len(older) > 0 and all(x.split()[0] < before for x in older), "exclusive older page " + prefix, out + err)
+        finally:
+            m.stop()
+
+
+def test_multiple_servers():
+    first, second = Mock(), Mock()
+    try:
+        binary = os.path.join(os.path.dirname(RCLI), "test_multi")
+        result = subprocess.run([binary, first.url, second.url], capture_output=True, text=True, timeout=60)
+        check(result.returncode == 0, "two live server sessions with colliding room IDs", result.stdout + result.stderr)
+    finally:
+        first.stop()
+        second.stop()
+
+
 def main():
     if not os.path.exists(RCLI):
         print("rcli not found:", RCLI)
@@ -258,8 +306,11 @@ def main():
     test_basic()
     test_totp()
     test_flaky_and_chunked()
+    test_ambiguous_send()
     test_prefix_and_errors()
     test_tls()
+    test_download_and_paging()
+    test_multiple_servers()
     print("integration tests: %d passed, %d failed" % (PASSES, len(FAILS)))
     return 1 if FAILS else 0
 

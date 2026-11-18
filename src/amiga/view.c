@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { VL_GAP, VL_DAY, VL_HEADER, VL_TEXT, VL_SYS, VL_PILLS };
 
 #define PAD          6
 #define GROUP_GAP_MS (5LL * 60000LL)
@@ -21,7 +20,7 @@ enum { VL_GAP, VL_DAY, VL_HEADER, VL_TEXT, VL_SYS, VL_PILLS };
 
 static int line_height(struct RastPort *rp)
 {
-    return rp->TxHeight + 3;
+    return rp->TxHeight + 5;
 }
 
 static int avatar_size(int lh)
@@ -169,13 +168,13 @@ static void italic(struct RastPort *rp, int on)
 void chat_init(ChatView *cv)
 {
     memset(cv, 0, sizeof(*cv));
-    buf_init(&cv->pool);
+    buf_init(&cv->pool); buf_init(&cv->urls);
     cv->follow = 1;
 }
 
 void chat_free(ChatView *cv)
 {
-    buf_free(&cv->pool);
+    buf_free(&cv->pool); buf_free(&cv->urls); ar_free(cv->links);
     ar_free(cv->v);
     memset(cv, 0, sizeof(*cv));
 }
@@ -194,6 +193,8 @@ static VLine *add_line(ChatView *cv, int kind, const char *text, int len)
     }
     l = &cv->v[cv->n++];
     memset(l, 0, sizeof(*l));
+    l->msg_index = cv->layout_msg;
+    l->file_index = -1;
     l->kind = (UBYTE)kind;
     l->off = (LONG)cv->pool.len;
     if (len > 0x7fff)
@@ -204,10 +205,59 @@ static VLine *add_line(ChatView *cv, int kind, const char *text, int len)
     return l;
 }
 
+/* Each wrapped fragment retains the full URL, including long split links. */
+static void line_links(ChatView *cv, struct RastPort *rp, const char *paragraph,
+                       const char *line, int len)
+{
+    const char *p = paragraph;
+    while (*p) {
+        const char *end, *a, *b;
+        int n;
+        LONG url_off;
+        if (ar_strncasecmp(p, "https://", 8) && ar_strncasecmp(p, "http://", 7)) { p++; continue; }
+        end = p;
+        while (*end && (unsigned char)*end > 32 && *end != '<' && *end != '>' && *end != '"') end++;
+        while (end > p) {
+            char c = end[-1], open = c == ')' ? '(' : c == ']' ? '[' : c == '}' ? '{' : 0;
+            if (strchr(".,;:!?", c)) { end--; continue; }
+            if (open) {
+                const char *q; int balance = 0;
+                for (q = p; q < end; q++) { if (*q == open) balance++; if (*q == c) balance--; }
+                if (balance < 0) { end--; continue; }
+            }
+            break;
+        }
+        a = p > line ? p : line; b = end < line + len ? end : line + len;
+        if (a < b) {
+            VLink *l;
+            size_t off;
+            n = (int)(end - p); url_off = -1;
+            for (off = 0; off < cv->urls.len; off += strlen(cv->urls.data + off) + 1)
+                if (strlen(cv->urls.data + off) == (size_t)n && !strncmp(cv->urls.data + off, p, n)) { url_off = off; break; }
+            if (url_off < 0) {
+                url_off = cv->urls.len;
+                if (buf_append(&cv->urls, p, n) < 0 || buf_putc(&cv->urls, 0) < 0) return;
+            }
+            if (cv->nlinks == cv->caplinks) {
+                int cap = cv->caplinks ? cv->caplinks * 2 : 32;
+                VLink *items = ar_realloc(cv->links, sizeof(*items) * (size_t)cap);
+                if (!items) return;
+                cv->links = items; cv->caplinks = cap;
+            }
+            l = &cv->links[cv->nlinks++]; l->row = cv->n - 1;
+            l->start = (int)(a - line); l->len = (int)(b - a);
+            l->x = (cv->no_avatars ? PAD + 8 : text_indent(cv->line_h)) + view_text_width(rp, line, l->start);
+            l->width = view_text_width(rp, a, l->len); l->url = url_off;
+        }
+        p = end > p ? end : p + 1;
+    }
+}
+
 /* Word-wraps one paragraph into lines of at most maxw pixels. */
 static void wrap(ChatView *cv, struct RastPort *rp, int kind, const char *s, int maxw, int hl)
 {
     int len = (int)strlen(s);
+    const char *paragraph = s;
 
     if (len == 0) {
         VLine *l = add_line(cv, kind, "", 0);
@@ -218,7 +268,9 @@ static void wrap(ChatView *cv, struct RastPort *rp, int kind, const char *s, int
     while (len > 0) {
         int n = fit(rp, s, len, maxw), cut;
         VLine *l;
-        if (n >= len) {
+        if (kind == VL_CODE) {
+            cut = n > 0 ? n : 1;
+        } else if (n >= len) {
             cut = len;
         } else {
             cut = n;
@@ -230,9 +282,10 @@ static void wrap(ChatView *cv, struct RastPort *rp, int kind, const char *s, int
         l = add_line(cv, kind, s, cut);
         if (l)
             l->hl = (UBYTE)hl;
+        if (l && kind == VL_TEXT) line_links(cv, rp, paragraph, s, cut);
         s += cut;
         len -= cut;
-        while (len > 0 && *s == ' ') {
+        while (kind != VL_CODE && len > 0 && *s == ' ') {
             s++;
             len--;
         }
@@ -295,19 +348,36 @@ static int name_colour(const char *name)
     return (int)(h % 6);
 }
 
+const char *view_attachment_limit(const RcAttachment *file,int preview)
+{
+    if(file->size>8LL*1024*1024) return "This file exceeds the 8 MiB download limit. Open it using the desktop client.";
+    if(preview && file->size>2LL*1024*1024) return "This image exceeds the 2 MiB preview limit. Save it instead (up to 8 MiB).";
+    return NULL;
+}
+
+void view_file_size(char *out,int size,long long bytes)
+{
+    if(bytes<=0) snprintf(out,size,"size unknown");
+    else if(bytes<1024) snprintf(out,size,"%lld B",bytes);
+    else if(bytes<1048576) snprintf(out,size,"%lld.%lld KiB",bytes/1024,(bytes%1024)*10/1024);
+    else snprintf(out,size,"%lld.%lld MiB",bytes/1048576,(bytes%1048576)*10/1048576);
+}
+
 void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *msgs,
                  long long tz_ms, long today, const char *me, const char *empty_text)
 {
-    int lh = line_height(rp), indent = text_indent(lh), maxw = width - indent - PAD, i;
+    int lh = line_height(rp), indent = cv->no_avatars ? PAD + 8 : text_indent(lh), maxw = width - indent - PAD, i;
     long lastday = -1;
     const char *prev_user = NULL;
     long long prev_ts = 0;
     Buf text, md, para;
 
-    buf_clear(&cv->pool);
+    buf_clear(&cv->pool); buf_clear(&cv->urls); cv->nlinks = 0;
     cv->n = 0;
     cv->width = width;
+    if (cv->code_font && cv->code_font->tf_YSize + 5 > lh) lh = cv->code_font->tf_YSize + 5;
     cv->line_h = lh;
+    indent = cv->no_avatars ? PAD + 8 : text_indent(lh); maxw = width - indent - PAD;
     if (maxw < 40)
         maxw = 40;
 
@@ -322,11 +392,11 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
     buf_init(&para);
     for (i = 0; i < msgs->count; i++) {
         const RcMsg *m = &msgs->items[i];
+        cv->layout_msg = i;
         long long local = m->ts_ms + tz_ms;
         long day = ms_day_number(local);
         const char *sys = rc_system_text(m->type);
         char hm[8];
-        char *p, *nl;
         int hl;
 
         if (day != lastday) {
@@ -337,6 +407,9 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
             add_line(cv, VL_DAY, lab, (int)strlen(lab));
             lastday = day;
             prev_user = NULL;
+        }
+        if(cv->unread_id && cv->unread_id[0] && !strcmp(cv->unread_id,m->id)) {
+            add_line(cv,VL_UNREAD,"New messages",12); prev_user=NULL;
         }
         ms_format_hm(local, hm);
 
@@ -380,28 +453,80 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
         prev_ts = m->ts_ms;
 
         hl = mentions(m->text, me);
-        buf_clear(&md);
-        md_to_plain(&md, m->text);
-        buf_clear(&text);
-        utf8_to_latin1_ex(&text, buf_str(&md), 1, 1);
-        if (m->n_attachments) {
-            if (text.len)
-                buf_putc(&text, '\n');
-            buf_puts(&text, "[file: ");
-            utf8_to_latin1(&text, m->attachment ? m->attachment : "attachment", 0);
-            buf_putc(&text, ']');
+        /* Preserve fenced code separately from prose and emoji conversion. */
+        {
+            const char *raw = m->text ? m->text : "";
+            int fenced = 0;
+            char fence = 0;
+            do {
+                const char *end = strchr(raw, '\n'), *t;
+                size_t len = end ? (size_t)(end - raw) : strlen(raw);
+                int marker;
+                if (len && raw[len - 1] == '\r') len--;
+                buf_clear(&para); buf_append(&para, raw, len);
+                t = buf_str(&para); while (*t == ' ' || *t == '\t') t++;
+                marker = (!strncmp(t, "```", 3) || !strncmp(t, "~~~", 3)) && !strstr(t + 3, !strncmp(t,"```",3) ? "```" : "~~~");
+                if (marker && (!fenced || *t == fence)) {
+                    if (!fenced) {
+                        fence = *t; buf_clear(&text); buf_puts(&text, "Code");
+                        if (t[3]) { buf_puts(&text, ": "); utf8_to_latin1(&text, t + 3, 0); }
+                        { struct TextFont *old = rp->Font;
+                          if (cv->code_font) SetFont(rp, cv->code_font);
+                          wrap(cv, rp, VL_CODE, buf_str(&text), maxw, 0);
+                          SetFont(rp, old);
+                        }
+                    }
+                    fenced = !fenced;
+                } else {
+                    buf_clear(&text);
+                    if (fenced) {
+                        struct TextFont *old = rp->Font;
+                        Buf expanded; const char *c; int col = 0;
+                        buf_init(&expanded);
+                        for (c = buf_str(&para); *c; c++) {
+                            if (*c == '\t') { do { buf_putc(&expanded, ' '); col++; } while (col % 4); }
+                            else { buf_putc(&expanded, *c); col++; }
+                        }
+                        utf8_to_latin1(&text, buf_str(&expanded), 1); buf_free(&expanded);
+                        if (cv->code_font) SetFont(rp, cv->code_font);
+                        wrap(cv, rp, VL_CODE, buf_str(&text), maxw, 0);
+                        SetFont(rp, old);
+                    } else {
+                        buf_clear(&md); md_to_plain(&md, buf_str(&para));
+                        utf8_to_latin1_ex(&text, buf_str(&md), 1, !cv->no_emoji);
+                        wrap(cv, rp, VL_TEXT, buf_str(&text), maxw, hl);
+                    }
+                }
+                if (!end) break;
+                raw = end + 1;
+            } while (1);
         }
-        if (m->edited)
-            buf_puts(&text, "  (edited)");
-        p = text.data ? text.data : (char *)"";
-        for (;;) {
-            nl = strchr(p, '\n');
-            if (nl)
-                *nl = 0;
-            wrap(cv, rp, VL_TEXT, p, maxw, hl);
-            if (!nl)
-                break;
-            p = nl + 1;
+        if (m->edited) wrap(cv, rp, VL_SYS, "(edited)", maxw, 0);
+
+        if (m->file_count) {
+            int f;
+            for (f = 0; f < m->file_count; f++) {
+                int first = cv->n, j;
+                buf_clear(&para);
+                buf_puts(&para, m->files[f].image ? "[Image] " : "[File] ");
+                utf8_to_latin1(&para, m->files[f].title ? m->files[f].title : "attachment", 0);
+                { char size[48]; view_file_size(size,sizeof(size),m->files[f].size); buf_printf(&para," (%s)",size); }
+                buf_puts(&para, m->files[f].image && cv->inline_images ? "  - click to expand / collapse" : "  - click to save");
+                wrap(cv, rp, VL_FILE, buf_str(&para), maxw, 0);
+                for (j = first; j < cv->n; j++) cv->v[j].file_index = f;
+                for (j = 0; j < cv->nimages; j++) if (cv->images[j].msg_index == i && cv->images[j].file_index == f) {
+                    int y;
+                    for (y = 0; y < cv->images[j].height; y += lh) {
+                        VLine *line = add_line(cv, VL_IMAGE, "", 0);
+                        if (line) { line->file_index = f; line->image_y = y; }
+                    }
+                }
+            }
+        } else if (m->n_attachments) {
+            buf_clear(&para);
+            buf_puts(&para, "[Attachment] ");
+            utf8_to_latin1(&para, m->attachment ? m->attachment : "No download link", 0);
+            wrap(cv, rp, VL_SYS, buf_str(&para), maxw, 0);
         }
 
         if (m->reactions) {   /* "code count" lines -> "<3 1\n(y) 2" pills */
@@ -419,9 +544,11 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
                     e = emoji_by_code(code, strlen(code));
                     if (para.len)
                         buf_putc(&para, '\n');
-                    if (e >= 0) {
+                    if (e >= 0 && !cv->no_emoji) {
                         buf_putc(&para, (char)EMOJI_MARK);
                         buf_putc(&para, (char)(EMOJI_BASE + e));
+                    } else if (e >= 0) {
+                        buf_puts(&para, emoji_table[e].fallback);
                     } else {
                         buf_printf(&para, ":%s:", code);
                     }
@@ -460,7 +587,7 @@ static void pill(struct RastPort *rp, int x, int y, int h, const char *s, int le
     RectFill(rp, x, y + 1, x + w - 1, y + h - 2);
     SetAPen(rp, p->pill_bg);
     RectFill(rp, x + 1, y + 2, x + w - 2, y + h - 3);
-    SetAPen(rp, p->text);
+    SetAPen(rp, p->pill_text);
     SetBPen(rp, p->pill_bg);
     text_at(rp, x + 5, y + 1, s, len);
     SetBPen(rp, p->bg);
@@ -469,7 +596,7 @@ static void pill(struct RastPort *rp, int x, int y, int h, const char *s, int le
 void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const ViewPens *p)
 {
     int lh = cv->line_h ? cv->line_h : line_height(rp);
-    int indent = text_indent(lh), av = avatar_size(lh);
+    int indent = cv->no_avatars ? PAD + 8 : text_indent(lh), av = avatar_size(lh);
     int left = box->Left, right = box->Left + box->Width - 1, bottom = box->Top + box->Height - 1;
     int i, y;
 
@@ -493,15 +620,16 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
         int x = left + indent, avail = right - x - PAD;
 
         switch (l->kind) {
+        case VL_UNREAD:
         case VL_DAY: {
             int tw = view_text_width(rp, s, l->len);
             int cx = left + (box->Width - tw) / 2, my = y + lh / 2;
-            SetAPen(rp, p->sep);
+            SetAPen(rp, l->kind==VL_UNREAD?p->highlight:p->sep);
             if (cx - 10 > left + PAD)
                 RectFill(rp, left + PAD, my, cx - 10, my);
             if (cx + tw + 10 < right - PAD)
                 RectFill(rp, cx + tw + 10, my, right - PAD, my);
-            SetAPen(rp, p->dim);
+            SetAPen(rp, l->kind==VL_UNREAD?p->highlight:p->dim);
             bold(rp, 1);
             text_at(rp, cx, y, s, l->len);
             bold(rp, 0);
@@ -512,6 +640,7 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             char ini[2];
             if (ay + av - 1 > bottom)
                 av = bottom - ay + 1;
+            if (!cv->no_avatars) {
             SetAPen(rp, p->avatar[l->avatar % 6]);
             RectFill(rp, ax, ay, ax + av - 1, ay + av - 1);
             ini[0] = l->initial ? l->initial : '?';
@@ -520,6 +649,8 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             bold(rp, 1);
             text_at(rp, ax + (av - TextLength(rp, (CONST_STRPTR)ini, 1)) / 2, ay + (av - lh) / 2 + 1, ini, 1);
             SetBPen(rp, p->bg);
+            }
+            bold(rp, 1);
             SetAPen(rp, p->text);
             n = fit(rp, s, l->name_len, avail);
             text_at(rp, x, y, s, n);
@@ -532,6 +663,38 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
                 text_at(rp, tx, y, s + l->name_len, n);
             }
             av = avatar_size(lh);
+            break;
+        }
+        case VL_IMAGE: {
+            int j;
+            for (j = 0; j < cv->nimages; j++) {
+                const ChatImage *image = &cv->images[j];
+                if (image->msg_index == l->msg_index && image->file_index == l->file_index) {
+                    int h = image->height - l->image_y, w = image->width;
+                    if (h > lh) h = lh;
+                    if (w > avail) w = avail;
+                    if (h > 0 && w > 0 && image->bitmap)
+                        BltBitMapRastPort(image->bitmap, 0, l->image_y, rp, x, y, w, h, 0xC0);
+                }
+            }
+            break;
+        }
+        case VL_FILE:
+            SetAPen(rp, p->text);
+            bold(rp, 0);
+            SetSoftStyle(rp, FSF_UNDERLINED, AskSoftStyle(rp));
+            text_at(rp, left + indent, y, s, l->len);
+            SetSoftStyle(rp, 0, AskSoftStyle(rp));
+            break;
+        case VL_CODE: {
+            struct TextFont *old = rp->Font;
+            SetAPen(rp, p->pill_bg);
+            RectFill(rp, x - 3, y, right - PAD, y + lh - 1);
+            SetBPen(rp, p->pill_bg); SetAPen(rp, p->pill_text);
+            if (cv->code_font) SetFont(rp, cv->code_font);
+            Move(rp, x, y + (lh - rp->TxHeight) / 2 + rp->TxBaseline);
+            Text(rp, (CONST_STRPTR)s, l->len);
+            SetFont(rp, old); SetBPen(rp, p->bg);
             break;
         }
         case VL_TEXT:
@@ -563,6 +726,31 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             break;
         }
     }
+    { int j;
+      for (j = 0; j < cv->nlinks; j++) {
+        const VLink *link = &cv->links[j]; const VLine *l;
+        if (link->row < cv->top || link->row >= cv->top + cv->visible) continue;
+        l = &cv->v[link->row];
+        SetAPen(rp, p->highlight); SetBPen(rp, p->bg);
+        SetSoftStyle(rp, FSF_UNDERLINED, AskSoftStyle(rp));
+        text_at(rp, left + link->x, box->Top + (link->row - cv->top) * lh,
+                cv->pool.data + l->off + link->start, link->len);
+        SetSoftStyle(rp, 0, AskSoftStyle(rp));
+      }
+    }
+}
+
+const char *chat_link_hit(const ChatView *cv, int x, int y)
+{
+    int row, i;
+    if (y < 0 || cv->line_h <= 0 || y >= cv->visible * cv->line_h) return NULL;
+    row = cv->top + y / cv->line_h;
+    for (i = 0; i < cv->nlinks; i++) {
+        const VLink *l = &cv->links[i];
+        if (l->row == row && x >= l->x && x < l->x + l->width)
+            return cv->urls.data + l->url;
+    }
+    return NULL;
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -620,9 +808,34 @@ int side_hit(const SideView *sv, int y)
     return i < sv->n ? i : -1;
 }
 
+void side_label_fit(struct RastPort *rp, const char *label, int width, int middle, char out[256])
+{
+    int len = (int)strlen(label), dots = TextLength(rp, (CONST_STRPTR)"...", 3);
+    int prefix, tail = len, budget;
+    out[0] = 0;
+    if (width <= 0) return;
+    if (len < 256 && TextLength(rp, (CONST_STRPTR)label, len) <= width) {
+        memcpy(out, label, (size_t)len + 1); return;
+    }
+    if (width < dots) return;
+    budget = width - dots;
+    if (middle) {
+        while (tail > 0 && len - tail < 180 &&
+               TextLength(rp, (CONST_STRPTR)label + tail - 1, len - tail + 1) <= budget * 2 / 3) tail--;
+        budget -= TextLength(rp, (CONST_STRPTR)label + tail, len - tail);
+    }
+    prefix = fit(rp, label, len, budget);
+    if (prefix > 252 - (len - tail)) prefix = 252 - (len - tail);
+    if (prefix < 0) prefix = 0;
+    memcpy(out, label, (size_t)prefix);
+    memcpy(out + prefix, "...", 3);
+    memcpy(out + prefix + 3, label + tail, (size_t)(len - tail));
+    out[prefix + 3 + len - tail] = 0;
+}
+
 void side_draw(SideView *sv, struct RastPort *rp, const struct IBox *box, const ViewPens *p)
 {
-    int rh = rp->TxHeight + 5, left = box->Left, right = box->Left + box->Width - 1;
+    int rh = rp->TxHeight + 5, icon = rp->TxHeight + 4, left = box->Left, right = box->Left + box->Width - 1;
     int bottom = box->Top + box->Height - 1, i, y;
 
     if (box->Width <= 0 || box->Height <= 0)
@@ -640,17 +853,23 @@ void side_draw(SideView *sv, struct RastPort *rp, const struct IBox *box, const 
         int ty = y + 2, x;
         char g[2];
 
-        if (r->kind == SR_GAP)
-            continue;
-        if (r->kind == SR_SECTION) {
-            g[0] = r->collapsed ? '>' : 'v';
-            SetBPen(rp, p->side_bg);
+        if (r->kind == SR_GAP) continue;
+        if(r->depth) {
+            int guide=left+PAD+(r->depth-1)*12+3;
+            SetAPen(rp,p->sep); Move(rp,guide,y); Draw(rp,guide,y+rh-1);
+            Move(rp,guide,y+rh/2); Draw(rp,guide+6,y+rh/2);
+        }
+        if (r->kind == SR_SECTION || r->kind == SR_SERVER) {
+            g[0] = r->kind==SR_SERVER && r->connection_state!=2 ? (r->connection_state==3?'!':'o') : r->collapsed ? '>' : 'v';
+            if(r->selected) { SetAPen(rp,p->side_sel); RectFill(rp,left+2,y,right-2,y+rh-1); }
+            SetBPen(rp,r->selected?p->side_sel:p->side_bg);
             SetAPen(rp, p->side_dim);
-            text_at(rp, left + PAD, ty, g, 1);
-            SetAPen(rp, p->side_text);
+            text_at(rp, left + PAD + r->depth * 12, ty, g, 1);
+            SetAPen(rp, r->kind==SR_SERVER && r->connection_state!=2 ?
+                (r->connection_state==3?p->presence[2]:r->connection_state==1?p->accent:p->side_dim) : p->side_text);
             bold(rp, 1);
-            text_at(rp, left + PAD + rp->TxWidth * 2, ty, r->label,
-                    fit(rp, r->label, (int)strlen(r->label), right - left - PAD * 3 - rp->TxWidth * 2));
+            text_at(rp, left + PAD + r->depth * 12 + icon + 6, ty, r->label,
+                    fit(rp, r->label, (int)strlen(r->label), right - left - PAD * 3 - icon - 6 - r->depth * 12));
             bold(rp, 0);
             continue;
         }
@@ -660,16 +879,58 @@ void side_draw(SideView *sv, struct RastPort *rp, const struct IBox *box, const 
             RectFill(rp, left + 2, y, right - 2, y + rh - 1);
         }
         SetBPen(rp, r->selected ? p->side_sel : p->side_bg);
-        x = left + PAD + rp->TxWidth * 2;
-        g[0] = (char)r->glyph;
-        SetAPen(rp, p->side_dim);
-        text_at(rp, x, ty, g, 1);
-        x += rp->TxWidth * 2;
+        x = left + PAD + r->depth * 12;
+        if (r->participants > 1) {
+            char number[8];
+            int nw;
+            snprintf(number, sizeof(number), "%d", r->participants);
+            nw = TextLength(rp, (CONST_STRPTR)number, strlen(number));
+            SetAPen(rp, p->accent);
+            RectFill(rp, x, y + 1, x + icon - 1, y + rh - 2);
+            SetAPen(rp, p->accent_text); SetBPen(rp, p->accent);
+            text_at(rp, x + (icon - nw) / 2, ty, number, (int)strlen(number));
+            SetBPen(rp, r->selected ? p->side_sel : p->side_bg);
+        } else if (r->is_dm) {
+            if (sv->no_avatars) {
+                SetAPen(rp, r->selected ? p->side_sel_text : p->side_dim);
+                text_at(rp, x, ty, "@", 1);
+            } else if (r->bitmap) BltBitMapRastPort(r->bitmap, 0, 0, rp, x, y + 1, icon, icon, 0xC0);
+            else {
+                char initial = r->label[0] ? r->label[0] : '?';
+                LONG colour = p->avatar[name_colour(r->label)];
+                if (initial >= 'a' && initial <= 'z') initial -= 32;
+                SetAPen(rp, colour); RectFill(rp, x, y + 1, x + icon - 1, y + rh - 2);
+                SetAPen(rp, p->avatar_text[name_colour(r->label)]); SetBPen(rp, colour);
+                text_at(rp, x + (icon - TextLength(rp, (CONST_STRPTR)&initial, 1)) / 2, ty, &initial, 1);
+                SetBPen(rp, r->selected ? p->side_sel : p->side_bg);
+            }
+        } else {
+            g[0] = (char)r->glyph;
+            SetAPen(rp, r->selected ? p->side_sel_dim : p->side_dim);
+            text_at(rp, x + 2, ty, g, 1);
+        }
+        x += icon + 6;
+        if (r->is_dm) {
+            int d = rp->TxHeight / 2;
+            int cy = y + (rh - d) / 2;
+            if (d < 4) d = 4;
+            SetAPen(rp, r->presence && !r->participants ? p->presence[(r->presence - 1) % 3] :
+                    (r->selected ? p->side_sel_dim : p->side_dim));
+            RectFill(rp, x, cy, x + d - 1, cy + d - 1);
+            if (!r->presence || r->participants) {
+                SetAPen(rp, r->selected ? p->side_sel : p->side_bg);
+                RectFill(rp, x + 1, cy + 1, x + d - 2, cy + d - 2);
+            }
+            x += d + 6;
+        }
         {
-            char cnt[12];
-            int cw = 0, n;
-            if (r->count != 0) {
-                if (r->count > 0)
+            char cnt[32];
+            int cw = 0;
+            char label[256];
+            if (r->count != 0 || r->mentions) {
+                if(r->mentions && r->count>0) snprintf(cnt,sizeof(cnt),"@%d / %d",r->mentions,r->count);
+                else if(r->mentions) snprintf(cnt,sizeof(cnt),"@%d",r->mentions);
+                else if (r->count > 0)
                     snprintf(cnt, sizeof(cnt), "%d", r->count);
                 else
                     strcpy(cnt, "!");
@@ -684,11 +945,11 @@ void side_draw(SideView *sv, struct RastPort *rp, const struct IBox *box, const 
                 SetBPen(rp, r->selected ? p->side_sel : p->side_bg);
                 cw += 6;
             }
-            SetAPen(rp, p->side_text);
+            SetAPen(rp, r->selected ? p->side_sel_text : p->side_text);
             if (r->bold)
                 bold(rp, 1);
-            n = fit(rp, r->label, (int)strlen(r->label), right - PAD - cw - x);
-            text_at(rp, x, ty, r->label, n);
+            side_label_fit(rp, r->label, right - PAD - cw - x, r->participants > 1, label);
+            text_at(rp, x, ty, label, (int)strlen(label));
             if (r->bold)
                 bold(rp, 0);
         }
@@ -728,4 +989,33 @@ void header_draw(struct RastPort *rp, const struct IBox *box, const ViewPens *p,
         SetAPen(rp, p->dim);
         text_at(rp, x, ty, topic, fit(rp, topic, (int)strlen(topic), right - x - PAD));
     }
+}
+
+int chat_file_hit(const ChatView *cv, int y, int *message, int *file)
+{
+    int row;
+    if (y < 0 || cv->line_h <= 0 || y >= cv->visible * cv->line_h) return 0;
+    row = cv->top + y / cv->line_h;
+    if (row < 0 || row >= cv->n || cv->v[row].file_index < 0) return 0;
+    *message = cv->v[row].msg_index; *file = cv->v[row].file_index;
+    return 1;
+}
+
+void composer_draw(struct RastPort *rp, const struct IBox *box, const ViewPens *p, const char *label)
+{
+    const char *hint = "Enter sends | Shift+Enter new line";
+    int right = box->Left + box->Width - PAD, y = box->Top + (box->Height - rp->TxHeight) / 2;
+    int hint_width = TextLength(rp, (CONST_STRPTR)hint, strlen(hint));
+    int budget = box->Width - PAD * 2;
+    char text[256];
+    if (box->Width <= 0 || box->Height <= 0) return;
+    SetDrMd(rp, JAM2); SetAPen(rp, p->bg); SetBPen(rp, p->bg);
+    RectFill(rp, box->Left, box->Top, box->Left + box->Width - 1, box->Top + box->Height - 1);
+    bold(rp, 0);
+    if (budget > hint_width + 120) {
+        SetAPen(rp, p->dim); text_at(rp, right - hint_width, y, hint, (int)strlen(hint));
+        budget -= hint_width + 20;
+    }
+    SetAPen(rp, p->text); side_label_fit(rp, label, budget, 0, text);
+    text_at(rp, box->Left + PAD, y, text, (int)strlen(text));
 }

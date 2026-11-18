@@ -38,6 +38,8 @@ static void usage(void)
         "  login                    log in and print user id and token\n"
         "  rooms                    list subscriptions\n"
         "  history ROOM [N]         last N messages (default 20)\n"
+        "  older ROOM BEFORE [N]    messages before an ISO timestamp\n"
+        "  download URL FILE        save a same-origin attachment\n"
         "  send ROOM TEXT...        send a message\n"
         "  watch ROOM [SECS] [N]    poll every SECS seconds (default 5), N cycles (0=forever)\n");
 }
@@ -215,6 +217,34 @@ int main(int argc, char **argv)
                 rc_msglist_free(&md);
             }
         }
+    } else if (!strcmp(cmd, "older")) {
+        const RcRoom *room;
+        RcMsgList page;
+        ar_ms before;
+        int i;
+        if (optind + 1 >= argc || !(before = iso8601_to_ms(argv[optind + 1]))) { ret = 64; goto done; }
+        room = sess_find_room(&s, argv[optind]);
+        if (!room) { ret = 1; goto done; }
+        rc_msglist_init(&page);
+        rc = rc_history(&s.rc, room->rid, room->type, optind + 2 < argc ? atoi(argv[optind + 2]) : 50, before, &page);
+        if (rc != RC_OK) ret = fail(&s, rc);
+        else {
+            rc_msglist_merge(&page, &(RcMsgList){0}, 0);
+            for (i = 0; i < page.count; i++) print_msg(&page.items[i]);
+        }
+        rc_msglist_free(&page);
+    } else if (!strcmp(cmd, "download")) {
+        Buf data;
+        if (optind + 1 >= argc) { ret = 64; goto done; }
+        buf_init(&data);
+        rc = rc_download(&s.rc, argv[optind], &data);
+        if (rc != RC_OK) ret = fail(&s, rc);
+        else {
+            FILE *f = fopen(argv[optind + 1], "wb");
+            if (!f) ret = 1;
+            else { if (fwrite(data.data, 1, data.len, f) != data.len) ret = 1; if (fclose(f)) ret = 1; }
+        }
+        buf_free(&data);
     } else if (!strcmp(cmd, "send")) {
         const RcRoom *r;
         Buf text;

@@ -187,6 +187,25 @@ class Handler(BaseHTTPRequestHandler):
         user = self.auth_user()
         if not user:
             return
+        if p == "/file-upload/x/redirect.png":
+            self.send_response(302)
+            self.send_header("Location", self.server.prefix + "/file-upload/x/screenshot.png")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if p == "/file-upload/x/screenshot.png":
+            # Browser-facing file routes authenticate with Meteor cookies.
+            expected = "rc_uid=" + USERS[user]["_id"] + "; rc_token=" + self.headers.get("X-Auth-Token", "")
+            if self.headers.get("Cookie") != expected:
+                self.send_json(403, {"error": "file route requires session cookies"})
+                return
+            body = b"\x89PNG\r\n\x1a\n\x00binary-test"
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if p == "/api/v1/me":
             u = USERS[user]
             return self.send_json(200, {"_id": u["_id"], "username": u["username"], "name": u["name"],
@@ -282,6 +301,9 @@ class Handler(BaseHTTPRequestHandler):
             msg = make_msg(rid, user, text)
             with LOCK:
                 MESSAGES[rid].append(msg)
+            if self.server.lose_send_reply:
+                self.close_connection = True
+                return  # Accepted once; simulate connection loss before the reply.
             return self.send_json(200, {"message": msg, "success": True})
         if p == "/api/v1/subscriptions.read":
             rid = body.get("rid") or body.get("roomId")
@@ -363,6 +385,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0 for the emulator)")
     ap.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"))
     ap.add_argument("--prefix", default="", help="serve under a path prefix, e.g. /chat")
+    ap.add_argument("--lose-send-reply", action="store_true")
     ap.add_argument("--close-every", type=int, default=0)
     ap.add_argument("--chunked", action="store_true", help="send history responses chunked")
     ap.add_argument("--ascii-json", action="store_true", help="escape non-ASCII as \\uXXXX")
@@ -372,6 +395,7 @@ def main():
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.daemon_threads = True
     srv.prefix = a.prefix.rstrip("/")
+    srv.lose_send_reply = a.lose_send_reply
     srv.close_every = a.close_every
     srv.chunked = a.chunked
     srv.ascii_json = a.ascii_json

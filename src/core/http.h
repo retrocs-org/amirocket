@@ -3,7 +3,8 @@
  *
  * One HttpClient talks to one origin. The connection is kept open between
  * requests (important on a 68020, where a TLS handshake takes seconds) and
- * transparently re-established once if the server closed it while idle.
+ * re-established once for GET/HEAD if the server closed it while idle.
+ * Mutating requests are never automatically replayed.
  * Supports Content-Length, chunked and close-delimited bodies.
  */
 #ifndef AR_HTTP_H
@@ -17,7 +18,7 @@ typedef struct {
     int   status;
     Buf   body;
     char  content_type[64];
-    char  location[256];
+    char  location[2048];
     ar_ms date_ms;         /* parsed Date header, 0 if absent */
 } HttpResponse;
 
@@ -35,6 +36,11 @@ typedef struct {
     int   rpos, rlen;
 
     char  user_agent[64];
+    int (*progress)(void *ctx,size_t received,size_t total); /* nonzero cancels */
+    void *progress_ctx;
+    size_t received,total,transfer_limit;
+    int cancelled;
+    size_t sent;          /* bytes written in this attempt; nonzero may have committed a POST */
     size_t max_body;       /* responses larger than this are rejected */
     char  err[256];
 

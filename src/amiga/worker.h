@@ -20,9 +20,16 @@
 enum {
     /* commands (GUI -> worker) */
     NC_CONNECT = 1,     /* a_url, a_user/a_pass/a_code or a_uid/a_token, a_verify */
+    NC_CREATE_ROOM,     /* a_user: type c/p/d; a_text: name, a_pass: members CSV */
+    NC_IMAGE,           /* a_url: same-origin image; avatar: downloaded bytes */
     NC_OPEN_ROOM,       /* a_rid */
+    NC_AVATAR,          /* a_user; avatar bytes, cosmetic only */
+    NC_PRESENCE,        /* members: username\tstatus lines */
+    NC_HISTORY,         /* a_rid, a_before: older page; does not alter sync cursor */
+    NC_DOWNLOAD,        /* a_url, a_text: attachment URL and chosen local path */
     NC_SEND,            /* a_rid, a_text (UTF-8) */
     NC_POLL_NOW,
+    NC_SET_FOCUS,       /* a_interval: selected server (1), background (0) */
     NC_SET_INTERVAL,    /* a_interval seconds */
     NC_LOGOUT,          /* revoke the token on the server */
     NC_DISCONNECT,      /* just drop the session */
@@ -30,17 +37,23 @@ enum {
 
     /* events (worker -> GUI) */
     NE_UPDATE = 100,    /* rooms: delta, msgs: delta for rid */
+    NE_PRESENCE,
+    NE_RECONNECTED,     /* successful automatic login, same payload as NC_CONNECT */
+    NE_TRANSFER,        /* a_before: bytes received, a_interval: total bytes */
     NE_STATUS           /* text: connection state change, rc: last error */
 };
 
 typedef struct NetMsg {
     struct Message msg;
+    int   server_slot;          /* stable configuration slot, 0..7 */
+    int   server_generation;    /* rejects late replies after profile replacement */
     int   kind;
     int   rc;                   /* RC_OK or RC_ERR_* */
     char  text[256];            /* error or status text */
 
     /* command arguments (owned by the message, ar_malloc'd) */
     char *a_url, *a_user, *a_pass, *a_code, *a_uid, *a_token, *a_rid, *a_text;
+    ar_ms a_before;
     int   a_verify;
     int   a_interval;
 
@@ -48,6 +61,7 @@ typedef struct NetMsg {
     char  rid[64];
     RcRoomList rooms;
     RcMsgList  msgs;
+    Buf avatar;
     char  username[96];
     char  display_name[96];
     char  user_id[64];
@@ -62,6 +76,7 @@ typedef struct NetMsg {
 
 /* Starts the worker; returns its command port's signal holder, or -1. */
 int  worker_start(struct MsgPort *gui_port, char *err, int errsz);
+void worker_cancel_transfer(int slot,ar_ms serial);
 void worker_stop(void);         /* NC_QUIT + wait; safe to call twice */
 
 NetMsg *netmsg_new(int kind);

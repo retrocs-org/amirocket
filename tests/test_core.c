@@ -4,6 +4,7 @@
  * (big-endian, 32-bit long, no FPU) as on the build machine.
  */
 #include "test_core.h"
+#include "../sdk/include/amirocket_rexx.h"
 #include "../src/core/buf.h"
 #include "../src/core/charset.h"
 #include "../src/core/json.h"
@@ -11,6 +12,7 @@
 #include "../src/core/emoji.h"
 #include "../src/core/mem.h"
 #include "../src/core/rc_api.h"
+#include "../src/core/session.h"
 #include "../src/core/timeutil.h"
 #include "../src/core/url.h"
 
@@ -266,6 +268,8 @@ static void test_markdown(void)
     MD("https://example.com/some_path_with_underscores_ ok", "https://example.com/some_path_with_underscores_ ok");
     MD("hi :smile: :thumbsup: :+1: :unknown_code: a:b:c",
        "hi \xF0\x9F\x98\x84 \xF0\x9F\x91\x8D \xF0\x9F\x91\x8D :unknown_code: a:b:c");
+    MD(":smiling_face_with_3_hearts: :smiling_face_with_hearts: :smiling_face_with_three_hearts:",
+       "\xF0\x9F\xA5\xB0 \xF0\x9F\xA5\xB0 \xF0\x9F\xA5\xB0");
     MD("# Title\n## Sub", "Title\nSub");
     MD("before\n```yaml\nkey: *value*\n  - _x_\n```\nafter *b*", "before\nkey: *value*\n  - _x_\nafter b");
     MD("```one line```", "one line");
@@ -282,6 +286,9 @@ static void test_emoji(void)
     int out[8], n;
 
     CHECK(emoji_by_cp(0x1F604) == 0);
+    CHECK(emoji_by_cp(0x1F970) == emoji_by_code("smiling_face_with_3_hearts", 26));
+    CHECK(emoji_by_code("smiling_face_with_hearts", 24) == emoji_by_cp(0x1F970));
+    CHECK(emoji_by_code("smiling_face_with_three_hearts", 30) == emoji_by_cp(0x1F970));
     CHECK(emoji_by_code("thumbsup", 8) >= 0 && emoji_by_code("+1", 2) == emoji_by_code("thumbsup", 8));
     CHECK(emoji_by_code("nope", 4) == -1);
     n = emoji_complete("smi", out, 8);
@@ -295,6 +302,274 @@ static void test_emoji(void)
     utf8_to_latin1_ex(&b, "\xF0\x9F\xA5\x82 \xE2\x9D\xA4\xEF\xB8\x8F", 0, 0);
     CHECK_STR(buf_str(&b), "(cheers) <3");
     buf_free(&b);
+}
+
+/* Real HTTP framing over an in-memory transport: no sockets required. */
+typedef struct { Buf response, request; size_t pos; int connects; const char *followup; int follow_after; } ApiWire;
+static int wire_read(void *v, void *buf, int len)
+{
+    ApiWire *w = v; size_t n = w->response.len - w->pos;
+    if (n > (size_t)len) n = (size_t)len;
+    memcpy(buf, w->response.data + w->pos, n); w->pos += n; return (int)n;
+}
+static int wire_write(void *v, const void *buf, int len)
+{
+    ApiWire *w = v; return buf_append(&w->request, buf, (size_t)len) < 0 ? -1 : len;
+}
+static int wire_fail_write(void *v,const void *buf,int len) { (void)v; (void)buf; (void)len; return -1; }
+static void wire_close(void *v) { (void)v; }
+static int wire_connect(void *v, const char *host, int port, const NetOptions *opt,
+                        Transport *tr, char *err, size_t size)
+{
+    ApiWire *w = v; w->pos = 0; w->connects++;
+    if (w->followup && w->connects > w->follow_after) { buf_clear(&w->response); buf_puts(&w->response,w->followup); w->followup=NULL; }
+    tr->ctx = w; tr->read = wire_read; tr->write = wire_write; tr->close = wire_close; tr->error = NULL;
+    return 0;
+}
+static void wire_response(ApiWire *w, int status, const char *type, const void *body, size_t len)
+{
+    buf_clear(&w->response); buf_clear(&w->request); w->pos = 0;
+    buf_printf(&w->response, "HTTP/1.1 %d test\r\nContent-Length: %lu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
+               status, (unsigned long)len, type);
+    buf_append(&w->response, body, len);
+}
+
+static void test_http_send_recovery(void)
+{
+    ApiWire w={0}; NetIface net={&w,wire_connect}; RcClient c; RcMsgList echo; HttpResponse response;
+    buf_init(&w.response); buf_init(&w.request); rc_msglist_init(&echo);
+    CHECK(rc_init(&c,&net,"http://chat.test",0)==RC_OK);
+    /* An established connection accepts the POST, then supplies no response. */
+    c.http.connected=1; c.http.uses=1; c.http.tr.ctx=&w; c.http.tr.read=wire_read;
+    c.http.tr.write=wire_write; c.http.tr.close=wire_close;
+    CHECK(rc_send(&c,"r1","only once",&echo)==RC_ERR_NET);
+    CHECK(w.connects==0 && strstr(c.err,"Delivery unconfirmed") && echo.count==0);
+    CHECK(strstr(buf_str(&w.request),"only once")!=NULL);
+    /* Safe reads may reconnect once after a stale idle connection. */
+    buf_clear(&w.request); buf_clear(&w.response); w.pos=0;
+    c.http.connected=1; c.http.uses=1; c.http.tr.ctx=&w;
+    c.http.tr.read=wire_read; c.http.tr.write=wire_write; c.http.tr.close=wire_close;
+    w.followup="HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"; w.follow_after=0;
+    http_response_init(&response);
+    CHECK(http_request(&c.http,"GET","/status",NULL,NULL,0,&response)==0 && w.connects==1);
+    http_response_free(&response);
+    c.http.connected=1; c.http.uses=1; c.http.tr.ctx=&w;
+    c.http.tr.read=wire_read; c.http.tr.write=wire_fail_write; c.http.tr.close=wire_close;
+    CHECK(rc_send(&c,"r1","write failed",&echo)==RC_ERR_NET && w.connects==1);
+    rc_msglist_free(&echo); rc_cleanup(&c); buf_free(&w.response); buf_free(&w.request);
+}
+
+static void test_poll_recovery(void)
+{
+    ApiWire w={0}; NetIface net={&w,wire_connect}; RcSession session; RcMsgList messages;
+    const char *empty="{\"result\":{\"updated\":[],\"deleted\":[]},\"success\":true}";
+    buf_init(&w.response); buf_init(&w.request); rc_msglist_init(&messages);
+    CHECK(sess_init(&session,&net,"http://chat.test",0)==RC_OK);
+    session.logged_in=1; session.foreground=0; strcpy(session.active_rid,"r1"); session.active_last=12345;
+    wire_response(&w,503,"text/html","unavailable",11);
+    CHECK(sess_poll(&session,NULL,&messages)!=RC_OK && session.active_last==12345 && session.logged_in);
+    wire_response(&w,200,"application/json",empty,strlen(empty));
+    CHECK(sess_poll(&session,NULL,&messages)==RC_OK && session.active_last==12345);
+    wire_response(&w,401,"text/html","expired",7);
+    CHECK(sess_poll(&session,NULL,&messages)==RC_ERR_AUTH && session.active_last==12345);
+    rc_msglist_free(&messages); sess_cleanup(&session); buf_free(&w.response); buf_free(&w.request);
+}
+
+typedef struct { size_t received,total,cancel_at; int calls; } ProgressProbe;
+static int probe_progress(void *ctx,size_t received,size_t total)
+{
+    ProgressProbe *p=ctx; p->received=received; p->total=total; p->calls++;
+    return p->cancel_at && received>=p->cancel_at;
+}
+static void test_transfer_progress(void)
+{
+    ApiWire w; NetIface net; RcClient c; Buf data; ProgressProbe p={0};
+    char body[5000]; int before;
+    memset(&w,0,sizeof(w)); memset(body,'x',sizeof(body)); buf_init(&w.response); buf_init(&w.request); buf_init(&data);
+    net.ctx=&w; net.connect=wire_connect;
+    CHECK(rc_init(&c,&net,"https://chat.test",1)==RC_OK);
+    c.http.progress=probe_progress; c.http.progress_ctx=&p;
+    wire_response(&w,200,"application/octet-stream",body,sizeof(body));
+    CHECK(rc_download(&c,"/file",&data)==RC_OK && data.len==sizeof(body));
+    CHECK(p.received==sizeof(body) && p.total==sizeof(body) && p.calls>2);
+    buf_free(&data); buf_init(&data); memset(&p,0,sizeof(p)); p.cancel_at=2000;
+    wire_response(&w,200,"application/octet-stream",body,sizeof(body)); before=w.connects;
+    CHECK(rc_download(&c,"/file",&data)!=RC_OK && strstr(rc_error(&c),"cancelled"));
+    CHECK(w.connects==before+1 && data.len==0 && !c.http.connected);
+    memset(&p,0,sizeof(p)); c.http.transfer_limit=100;
+    wire_response(&w,200,"image/png",body,sizeof(body));
+    CHECK(rc_download(&c,"/file",&data)!=RC_OK && strstr(rc_error(&c),"large"));
+    c.http.transfer_limit=0; memset(&p,0,sizeof(p));
+    buf_clear(&w.response); buf_puts(&w.response,"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n"); w.pos=0;
+    CHECK(rc_download(&c,"/file",&data)==RC_OK && data.len==5 && p.received==5 && p.total==0);
+    rc_cleanup(&c); buf_free(&data); buf_free(&w.response); buf_free(&w.request);
+}
+static void test_create_conversations(void)
+{
+    ApiWire w; NetIface net; RcClient c; RcRoomList rooms; int before;
+    const char *reply = "{\"success\":true,\"channel\":{\"_id\":\"created-c\"}}";
+    memset(&w, 0, sizeof(w)); buf_init(&w.response); buf_init(&w.request);
+    net.ctx = &w; net.connect = wire_connect; rc_roomlist_init(&rooms);
+    CHECK(rc_init(&c, &net, "https://chat.test/base", 1) == RC_OK);
+    strcpy(c.token, "SECRET"); strcpy(c.user_id, "USER");
+    wire_response(&w, 201, "application/json", reply, strlen(reply));
+    CHECK(rc_create_room(&c, 'c', "amiga-dev", " @alice , bob ", &rooms) == RC_OK);
+    CHECK(rooms.count == 1 && !strcmp(rooms.items[0].rid, "created-c") && rooms.items[0].type == 'c');
+    CHECK(strstr(buf_str(&w.request), "POST /base/api/v1/channels.create HTTP/1.1") != NULL);
+    CHECK(strstr(buf_str(&w.request), "\"members\":[\"alice\",\"bob\"]") != NULL);
+    CHECK(strstr(buf_str(&w.request), "X-Auth-Token: SECRET") != NULL);
+
+    rc_roomlist_free(&rooms);
+    reply = "{\"success\":true,\"group\":{\"_id\":\"created-p\"}}";
+    wire_response(&w, 200, "application/json", reply, strlen(reply));
+    CHECK(rc_create_room(&c, 'p', "private-amiga", "", &rooms) == RC_OK);
+    CHECK(rooms.count == 1 && rooms.items[0].type == 'p');
+    CHECK(strstr(buf_str(&w.request), "POST /base/api/v1/groups.create") != NULL);
+    rc_roomlist_free(&rooms);
+    reply = "{\"success\":true,\"room\":{\"_id\":\"created-d\"}}";
+    wire_response(&w, 200, "application/json", reply, strlen(reply));
+    CHECK(rc_create_room(&c, 'd', "", "alice,bob", &rooms) == RC_OK);
+    CHECK(rooms.count == 1 && rooms.items[0].type == 'd' && rooms.items[0].member_count == 3);
+    CHECK(strstr(buf_str(&w.request), "\"usernames\":\"alice,bob\"") != NULL);
+    rc_roomlist_free(&rooms);
+    before = w.connects;
+    CHECK(rc_create_room(&c, 'd', "", "", &rooms) == RC_ERR_ARGS);
+    CHECK(rc_create_room(&c, 'c', "bad name", "", &rooms) == RC_ERR_ARGS);
+    CHECK(rc_create_room(&c, 'p', "name", "alice\nInjected", &rooms) == RC_ERR_ARGS);
+    CHECK(w.connects == before);
+    reply = "{\"success\":false,\"error\":\"error-not-allowed\"}";
+    wire_response(&w, 403, "application/json", reply, strlen(reply));
+    CHECK(rc_create_room(&c, 'c', "denied", "", &rooms) != RC_OK && rooms.count == 0);
+    reply = "{\"success\":true,\"room\":{}}";
+    wire_response(&w, 200, "application/json", reply, strlen(reply));
+    CHECK(rc_create_room(&c, 'd', "", "alice", &rooms) == RC_ERR_PROTO);
+    rc_cleanup(&c); rc_roomlist_free(&rooms); buf_free(&w.response); buf_free(&w.request);
+}
+
+static void test_unread_file_metadata(void)
+{
+    ApiWire w={0}; NetIface net={&w,wire_connect}; RcClient c; RcRoomList rooms; RcMsgList messages;
+    const char *subscriptions="{\"success\":true,\"update\":[{\"rid\":\"r\",\"name\":\"general\",\"unread\":5,\"userMentions\":2,\"groupMentions\":1,\"ls\":{\"$date\":1767225600000}}]}";
+    const char *files="{\"success\":true,\"messages\":[{\"_id\":\"m\",\"u\":{\"username\":\"alice\"},\"attachments\":[{\"title\":\"a.png\",\"image_url\":\"/a\",\"image_size\":2048},{\"title\":\"b\",\"title_link\":\"/b\",\"size\":-5}]}]}";
+    buf_init(&w.response); buf_init(&w.request); rc_roomlist_init(&rooms); rc_msglist_init(&messages);
+    CHECK(rc_init(&c,&net,"https://chat.test",1)==RC_OK);
+    wire_response(&w,200,"application/json",subscriptions,strlen(subscriptions));
+    CHECK(rc_rooms(&c,0,&rooms)==RC_OK && rooms.count==1);
+    CHECK(rooms.items[0].mentions==3 && rooms.items[0].last_seen_ms==1767225600000LL && rooms.items[0].unread==5);
+    wire_response(&w,200,"application/json",files,strlen(files));
+    CHECK(rc_history(&c,"r",'c',20,0,&messages)==RC_OK && messages.count==1);
+    CHECK(messages.items[0].file_count==2 && messages.items[0].files[0].size==2048 && messages.items[0].files[1].size==0);
+    rc_roomlist_free(&rooms); rc_msglist_free(&messages); rc_cleanup(&c); buf_free(&w.response); buf_free(&w.request);
+}
+
+static void test_api_files_history(void)
+{
+    ApiWire w; NetIface net; RcClient c; Buf file; RcMsgList page, all;
+    const char binary[] = {'P','N','G',0,'x',(char)0xff};
+    const char *json = "{\"success\":true,\"messages\":[{\"_id\":\"m2\",\"rid\":\"r\",\"msg\":\"two\",\"ts\":\"2026-01-02T00:00:00Z\",\"u\":{\"username\":\"a\"},\"attachments\":[{\"title\":\"one.png\",\"image_url\":\"/file-upload/1/one.png\"},{\"title\":\"two.pdf\",\"title_link\":\"/file-upload/2/two.pdf\"}]},{\"_id\":\"m1\",\"rid\":\"r\",\"msg\":\"one\",\"ts\":\"2026-01-01T00:00:00Z\",\"u\":{\"username\":\"b\"}}]}";
+    memset(&w, 0, sizeof(w)); buf_init(&w.response); buf_init(&w.request); buf_init(&file);
+    net.ctx = &w; net.connect = wire_connect;
+    CHECK(rc_init(&c, &net, "https://chat.test/chat", 1) == RC_OK);
+    strcpy(c.token, "SECRET"); strcpy(c.user_id, "USER");
+    wire_response(&w, 200, "image/png", binary, sizeof(binary));
+    CHECK(rc_download(&c, "/chat/file-upload/x/one.png", &file) == RC_OK);
+    CHECK(file.len == sizeof(binary) && !memcmp(file.data, binary, sizeof(binary)));
+    CHECK(strstr(buf_str(&w.request), "GET /chat/file-upload/x/one.png HTTP/1.1") != NULL);
+    CHECK(strstr(buf_str(&w.request), "X-Auth-Token: SECRET") != NULL);
+    CHECK(strstr(buf_str(&w.request), "Cookie: rc_uid=USER; rc_token=SECRET") != NULL);
+    {
+        const char *second;
+        wire_response(&w,302,"image/png","",0);
+        buf_clear(&w.response);
+        buf_puts(&w.response,"HTTP/1.1 302 Found\r\nLocation: https://storage.test/object?signature=abc\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        w.followup="HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: image/png\r\nConnection: close\r\n\r\nPNG";
+        w.follow_after=w.connects+1;
+        CHECK(rc_download(&c,"/chat/file",&file)==RC_OK && file.len==3);
+        second=strstr(buf_str(&w.request),"GET /object?signature=abc ");
+        CHECK(second && !strstr(second,"SECRET") && !strstr(second,"Cookie:") && !strstr(second,"X-Auth"));
+        wire_response(&w,302,"image/png","",0);
+        buf_clear(&w.response);
+        buf_puts(&w.response,"HTTP/1.1 302 Found\r\nLocation: http://storage.test/object\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        CHECK(rc_download(&c,"/chat/file",&file)!=RC_OK);
+    }
+
+    { const char *bad[] = {"https://evil.test/file", "http://chat.test/chat/file", "https://chat.test:444/file", "//evil.test/file", "javascript:alert(1)", "/file\r\nX: injected", "https://chat.test@evil.test/file"};
+      int i, before = w.connects;
+      for (i = 0; i < 7; i++) CHECK(rc_download(&c, bad[i], &file) == RC_ERR_ARGS);
+      CHECK(w.connects == before);
+    }
+    wire_response(&w, 302, "image/png", "", 0);
+    CHECK(rc_download(&c, "https://chat.test/chat/file", &file) == RC_ERR_HTTP);
+    wire_response(&w, 200, "text/html", "login", 5);
+    CHECK(rc_download(&c, "/chat/file", &file) == RC_ERR_HTTP);
+    wire_response(&w, 200, "application/octet-stream", binary, sizeof(binary));
+    CHECK(rc_download(&c, "file-upload/x/file", &file) == RC_OK);
+    CHECK(strstr(buf_str(&w.request), "GET /chat/file-upload/x/file ") != NULL);
+    CHECK(c.http.max_body == 4UL * 1024UL * 1024UL);
+    rc_msglist_init(&page); rc_msglist_init(&all);
+    wire_response(&w, 200, "application/json", json, strlen(json));
+    CHECK(rc_history(&c, "r", 'c', 50, iso8601_to_ms("2026-01-03T00:00:00Z"), &page) == RC_OK);
+    CHECK(strstr(buf_str(&w.request), "latest=2026-01-03T00%3A00%3A00.000Z&inclusive=false") != NULL);
+    CHECK(page.count == 2);
+    CHECK(rc_msglist_merge(&all, &page, 1000) == 0);
+    CHECK(all.count == 2 && !strcmp(all.items[0].id, "m1"));
+    CHECK(all.items[1].file_count == 2 && all.items[1].files[0].image && !all.items[1].files[1].image);
+    CHECK_STR(all.items[1].files[1].url, "/file-upload/2/two.pdf");
+    wire_response(&w, 200, "application/json", json, strlen(json));
+    CHECK(rc_history(&c, "r", 'c', 50, 0, &page) == RC_OK);
+    CHECK(rc_msglist_merge(&all, &page, 1000) == 0 && all.count == 2);
+    rc_msglist_free(&all); rc_msglist_free(&page);
+    { const char *fallback = "{\"success\":true,\"messages\":[{\"_id\":\"f\",\"u\":{\"username\":\"a\"},\"file\":{\"_id\":\"file1\",\"name\":\"a b.png\",\"size\":4096,\"type\":\"image/png\"}}]}";
+      wire_response(&w, 200, "application/json", fallback, strlen(fallback));
+      CHECK(rc_history(&c, "r", 'c', 10, 0, &page) == RC_OK);
+      CHECK(page.count == 1 && page.items[0].file_count == 1 && page.items[0].files[0].image);
+      CHECK_STR(page.items[0].files[0].url, "file-upload/file1/a%20b.png");
+      CHECK(page.items[0].files[0].size==4096);
+      rc_msglist_free(&page);
+    }
+    buf_clear(&w.response); buf_puts(&w.response, "HTTP/1.1 200 OK\r\nContent-Length: 9000000\r\nConnection: close\r\n\r\n");
+    CHECK(rc_download(&c, "/chat/file", &file) == RC_ERR_NET);
+    CHECK(c.http.max_body == 4UL * 1024UL * 1024UL);
+    { char *presence = NULL;
+      const char *json = "{\"success\":true,\"users\":[{\"username\":\"alice\",\"status\":\"online\"},{\"username\":\"bob\",\"status\":\"busy\"}]}";
+      wire_response(&w,200,"application/json",json,strlen(json));
+      CHECK(rc_presence(&c,&presence) == RC_OK);
+      CHECK_STR(presence, "alice\tonline\nbob\tbusy\n"); ar_free(presence);
+      wire_response(&w,200,"image/png",binary,sizeof(binary));
+      CHECK(rc_avatar(&c,"alice",&file) == RC_OK);
+      CHECK(strstr(buf_str(&w.request),"GET /chat/api/v1/avatar/alice?format=png&size=32 ") != NULL);
+      CHECK(strstr(buf_str(&w.request),"Cookie: rc_uid=USER; rc_token=SECRET") != NULL);
+      CHECK(strstr(buf_str(&w.request),"?rc_token=") == NULL);
+      CHECK(c.http.max_body == 4UL * 1024UL * 1024UL);
+      wire_response(&w,302,"image/png",binary,sizeof(binary)); CHECK(rc_avatar(&c,"alice",&file) == RC_ERR_HTTP);
+      wire_response(&w,404,"text/html","missing",7); CHECK(rc_avatar(&c,"alice",&file) == RC_ERR_HTTP);
+      CHECK(strstr(buf_str(&w.request),"GET /chat/avatar/alice?format=png&size=32 ") != NULL);
+    }
+    { RcRoom room; memset(&room,0,sizeof(room)); room.type='d'; room.name=(char *)"alice,bob";
+      CHECK(rc_dm_participants(&room,"you") == 3);
+      room.name=(char *)"alice,bob,you"; CHECK(rc_dm_participants(&room,"you") == 3);
+      room.name=(char *)"alice,bob,charlie"; CHECK(rc_dm_participants(&room,"you") == 4);
+      room.member_count=8; CHECK(rc_dm_participants(&room,"you") == 8);
+      room.member_count=0; room.name=(char *)"alice"; CHECK(rc_dm_participants(&room,"you") == 0);
+    }
+    rc_cleanup(&c);
+    buf_free(&file); buf_free(&w.request); buf_free(&w.response);
+}
+
+
+static void test_dock_protocol(void)
+{
+    ArDockEvent e; unsigned long n; char value[80];
+    CHECK(ar_rexx_field("unread=17 selected_unread=3\nserver=2 unread=99","unread",value,sizeof(value)) && !strcmp(value,"17"));
+    CHECK(!ar_rexx_field("selected_unread=3\nserver=2 unread=99","unread",value,sizeof(value)));
+    CHECK(ar_rexx_number("seq=4294967295","seq",&n) && n==4294967295UL);
+    CHECK(!ar_rexx_number("unread=-1","unread",&n) && !ar_rexx_number("unread=1x","unread",&n));
+    CHECK(ar_rexx_event2("AMIROCKET_EVENT2 instance-1 23 SERVERSTATUS \"2\" \"-2\" \"failed \"\"quoted\"\" text\" dropped=7 truncated=0",&e));
+    CHECK(e.sequence==23 && e.dropped==7 && !e.truncated && !strcmp(e.epoch,"instance-1") && !strcmp(e.kind,"SERVERSTATUS"));
+    CHECK(ar_rexx_event2("AMIROCKET_EVENT2 newer 1 RESYNC \"\" \"\" \"snapshot required\" dropped=0 truncated=1",&e) && e.truncated);
+    CHECK(!ar_rexx_event2("AMIROCKET_EVENT2 e 1 MESSAGE \"unterminated",&e));
+    CHECK(!ar_rexx_event2("AMIROCKET_EVENT2 e 1 MESSAGE \"r\" \"u\" \"text\" dropped=0 truncated=9",&e));
+    CHECK(!ar_rexx_event2("AMIROCKET_EVENT MESSAGE \"r\" \"u\" \"text\"",&e));
 }
 
 int run_core_tests(void (*log)(const char *))
@@ -311,6 +586,13 @@ int run_core_tests(void (*log)(const char *))
     test_merge();
     test_markdown();
     test_emoji();
+    test_api_files_history();
+    test_unread_file_metadata();
+    test_create_conversations();
+    test_dock_protocol();
+    test_transfer_progress();
+    test_http_send_recovery();
+    test_poll_recovery();
     snprintf(b, sizeof(b), "core tests: %d passed, %d failed\n", g_pass, g_fail);
     log(b);
     return g_fail;

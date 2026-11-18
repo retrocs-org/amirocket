@@ -10,7 +10,7 @@ int sess_init(RcSession *s, const NetIface *net, const char *url, int verify_tls
 
     memset(s, 0, sizeof(*s));
     rc_roomlist_init(&s->rooms);
-    s->history_count = 50;
+    s->history_count = 50; s->foreground=1;
     rc = rc_init(&s->rc, net, url, verify_tls);
     return rc;
 }
@@ -91,7 +91,7 @@ int sess_open_room(RcSession *s, const char *rid, RcMsgList *out)
     s->active_last = hist.newest_ms ? hist.newest_ms : s->rc.http.last_date_ms;
     rc_msglist_merge(out, &hist, 0);
     rc_msglist_free(&hist);
-    if (r->unread || r->alert)
+    if (s->foreground && (r->unread || r->alert))
         rc_mark_read(&s->rc, s->active_rid);   /* best effort */
     if (r->type != 'd')
         rc_room_topic(&s->rc, s->active_rid, s->active_topic, sizeof(s->active_topic));
@@ -126,7 +126,7 @@ int sess_poll(RcSession *s, RcRoomList *room_delta, RcMsgList *msg_delta)
                 s->active_last = got.newest_ms;
             /* the cursor is inclusive on some server versions; only a
              * genuinely newer change marks the room as read */
-            if (got.newest_ms > before && got.count > 0)
+            if (s->foreground && got.newest_ms > before && got.count > 0)
                 rc_mark_read(&s->rc, s->active_rid);
             /* hand deletions to the caller too (merge would consume them) */
             if (got.n_deleted) {

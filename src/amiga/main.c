@@ -34,7 +34,8 @@
 
 const char ar_version_tag[] = "\0$VER: AmiRocket " AR_VERSION " (" AR_DATE ")";
 
-/* libnix: run main() on a 64 KB stack (TLS and JSON parsing need it) */
+/* Workbench stack size is set in the icon. Shell launches need Stack 65536;
+ * this toolchain does not use __stack to resize an existing CLI stack. */
 unsigned long __stack = 65536;
 
 static void out(const char *s)

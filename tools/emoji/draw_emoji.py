@@ -92,7 +92,7 @@ def hand(d, x0, y0, x1, y1):
 def draw(name):
     im, d = canvas()
     if name in ("smile", "grinning", "smiley", "grin", "joy", "laughing", "sweat_smile", "rofl",
-                "slight_smile", "blush", "wink", "innocent", "heart_eyes", "kissing_heart",
+                "slight_smile", "blush", "wink", "innocent", "heart_eyes", "kissing_heart", "smiling_face_with_3_hearts",
                 "stuck_out_tongue", "stuck_out_tongue_winking_eye", "sunglasses", "thinking",
                 "neutral_face", "confused", "upside_down", "rolling_eyes", "slight_frown", "cry",
                 "sob", "rage", "angry", "open_mouth", "scream", "partying_face"):
@@ -126,6 +126,12 @@ def draw(name):
         heart(d, 42, 50, 16)
         heart(d, 86, 50, 16)
         grin(d, teeth=False)
+    elif name == "smiling_face_with_3_hearts":
+        happy_eyes(d)
+        smile(d)
+        heart(d, 103, 30, 20)
+        heart(d, 25, 83, 20)
+        heart(d, 94, 103, 20)
     elif name == "kissing_heart":
         dot_eyes(d)
         d.ellipse([56, 80, 72, 96], outline=O, width=LW)

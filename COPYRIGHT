@@ -1,0 +1,11 @@
+AmiRocket
+Copyright (C) 2026 Tommy Frössman and contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+AmiRocket is free software: you can redistribute it and/or modify it under
+version 3 of the GNU General Public License, or (at your option) any later
+version. It is distributed WITHOUT ANY WARRANTY. See LICENSE for the full text.
+
+Release tooling and installer icon-generation code adapted from Beam68
+Copyright (c) 2026 Beam68 contributors, MIT licensed.
+The retained notice is in licenses/Beam68-release-tools.txt.

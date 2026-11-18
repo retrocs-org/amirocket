@@ -16,6 +16,7 @@ typedef struct {
     RcClient   rc;
     RcRoomList rooms;
     int        logged_in;
+    int        foreground; /* background polling must not mark messages as read */
 
     char  active_rid[64];
     char  active_type;

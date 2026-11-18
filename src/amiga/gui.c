@@ -13,6 +13,9 @@
  */
 #include "gui.h"
 #include "prefs.h"
+#include "prefs_ipc.h"
+#include "plugins.h"
+#include "arexx.h"
 #include "theme.h"
 #include "view.h"
 #include "emoji_data.h"
@@ -30,8 +33,10 @@
 #include <intuition/intuition.h>
 #include <intuition/gadgetclass.h>
 #include <intuition/icclass.h>
+#include <intuition/classes.h>
 #include <intuition/sghooks.h>
 #include <devices/inputevent.h>
+#include <devices/clipboard.h>
 #include <libraries/gadtools.h>
 #include <utility/hooks.h>
 #include <graphics/regions.h>
@@ -43,6 +48,16 @@
 #include <gadgets/layout.h>
 #include <gadgets/button.h>
 #include <gadgets/string.h>
+#include <gadgets/texteditor.h>
+#include <libraries/asl.h>
+#include <graphics/text.h>
+#include <datatypes/pictureclass.h>
+#include <datatypes/datatypesclass.h>
+#include <proto/datatypes.h>
+#include <proto/asl.h>
+#include <proto/diskfont.h>
+#include <proto/texteditor.h>
+#include <dos/dostags.h>
 #include <gadgets/listbrowser.h>
 #include <gadgets/space.h>
 #include <gadgets/scroller.h>
@@ -57,6 +72,8 @@
 #include <proto/gadtools.h>
 #include <proto/utility.h>
 #include <proto/locale.h>
+#include <proto/icon.h>
+#include <workbench/workbench.h>
 #include <proto/window.h>
 #include <proto/layout.h>
 #include <proto/button.h>
@@ -78,43 +95,73 @@ struct Library *GadToolsBase;
 struct Library *UtilityBase;
 struct LocaleBase *LocaleBase;
 struct Library *WindowBase, *LayoutBase, *ButtonBase, *StringBase;
+struct Library *IconBase;
+struct Library *AslBase, *DiskfontBase, *TextFieldBase, *DataTypesBase;
 struct Library *ListBrowserBase, *CheckBoxBase, *LabelBase, *SpaceBase, *ScrollerBase;
 
-#define MAX_MESSAGES 300
+#define MAX_MESSAGES 1000
 #define INPUT_MAX    4000
 #define MAX_SUGG     8
 
 enum {
-    G_ROOMS = 1, G_MSGS, G_INPUT, G_SEND, G_STATUS, G_ROOMHDR, G_SIDESCROLL, G_CHATSCROLL,
+    G_ROOMS = 1, G_MSGS, G_INPUT, G_SEND, G_STATUS, G_ROOMHDR, G_SIDESCROLL, G_CHATSCROLL, G_FILTER, G_COMPOSELABEL,
     L_SERVER, L_USER, L_PASS, L_CODE, L_VERIFY, L_REMEMBER, L_CONNECT, L_CANCEL,
+    G_NEW, G_PREFSB, G_EMOJI, G_BOLD, G_ITALIC, G_STRIKE, G_INLINECODE, G_CODEBLOCK, G_LINK, G_CONNECTB,
     G_COUNT
 };
 
-enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH, M_OWNSCREEN, M_THEME_BASE = 100 };
+enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH, M_OWNSCREEN, M_FONT, M_SCREENFONT, M_PREVIEW, M_OLDER, M_SEND, M_COMPLETE, M_NEXTSUGG, M_PREVSUGG, M_COPY, M_CUT, M_PASTE, M_COPYMSG, M_PREFS, M_NEWDM, M_NEWCHANNEL, M_NEWPRIVATE, M_SAVEFILE, M_CLEARIMAGES, M_ICONIFY, M_NEXTUNREAD, M_JUMPUNREAD, M_THEME_BASE = 100, M_PLUGIN_BASE = 200 };
 
 static struct NewMenu g_newmenu[] = {
     { NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL },
-    { NM_ITEM, (STRPTR)"Connect...", (STRPTR)"C", 0, 0, (APTR)M_CONNECT },
+    { NM_ITEM, (STRPTR)"Connect...", NULL, 0, 0, (APTR)M_CONNECT },
     { NM_ITEM, (STRPTR)"Disconnect", (STRPTR)"D", 0, 0, (APTR)M_DISCONNECT },
     { NM_ITEM, (STRPTR)"Log out and forget login", NULL, 0, 0, (APTR)M_LOGOUT },
     { NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL },
+    { NM_ITEM, (STRPTR)"Iconify", (STRPTR)"H", 0, 0, (APTR)M_ICONIFY },
+    { NM_ITEM, (STRPTR)"Preferences...", (STRPTR)",", 0, 0, (APTR)M_PREFS },
     { NM_ITEM, (STRPTR)"About...", (STRPTR)"?", 0, 0, (APTR)M_ABOUT },
     { NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL },
     { NM_ITEM, (STRPTR)"Quit", (STRPTR)"Q", 0, 0, (APTR)M_QUIT },
     { NM_TITLE, (STRPTR)"Room", NULL, 0, 0, NULL },
+    { NM_ITEM, (STRPTR)"New direct / group message...", (STRPTR)"N", 0, 0, (APTR)M_NEWDM },
+    { NM_ITEM, (STRPTR)"New public channel...", NULL, 0, 0, (APTR)M_NEWCHANNEL },
+    { NM_ITEM, (STRPTR)"New private channel...", NULL, 0, 0, (APTR)M_NEWPRIVATE },
+    { NM_ITEM, (STRPTR)"Clear image previews", NULL, 0, 0, (APTR)M_CLEARIMAGES },
+    { NM_ITEM, (STRPTR)"Save selected attachment...", NULL, 0, 0, (APTR)M_SAVEFILE },
+    { NM_ITEM, (STRPTR)"Next unread room", (STRPTR)"U", 0, 0, (APTR)M_NEXTUNREAD },
+    { NM_ITEM, (STRPTR)"Jump to new messages", (STRPTR)"L", 0, 0, (APTR)M_JUMPUNREAD },
     { NM_ITEM, (STRPTR)"Check for new messages", (STRPTR)"R", 0, 0, (APTR)M_REFRESH },
-    { NM_TITLE, (STRPTR)"Settings", NULL, 0, 0, NULL },
-    { NM_ITEM, (STRPTR)"Theme on its own screen", NULL, CHECKIT | MENUTOGGLE, 0, (APTR)M_OWNSCREEN },
-    { NM_ITEM, (STRPTR)"Theme", NULL, 0, 0, NULL },
-    /* theme sub-items are appended at run time */
+    { NM_ITEM, (STRPTR)"Load older messages", (STRPTR)"O", 0, 0, (APTR)M_OLDER },
+    { NM_ITEM, (STRPTR)"Send message", (STRPTR)"S", 0, 0, (APTR)M_SEND },
+    { NM_ITEM, (STRPTR)"Insert suggested name / emoji", (STRPTR)"I", 0, 0, (APTR)M_COMPLETE },
+    { NM_ITEM, (STRPTR)"Next suggestion", (STRPTR)"J", 0, 0, (APTR)M_NEXTSUGG },
+    { NM_ITEM, (STRPTR)"Previous suggestion", (STRPTR)"K", 0, 0, (APTR)M_PREVSUGG },
+    { NM_TITLE, (STRPTR)"Edit", NULL, 0, 0, NULL },
+    { NM_ITEM, (STRPTR)"Copy", (STRPTR)"C", 0, 0, (APTR)M_COPY },
+    { NM_ITEM, (STRPTR)"Cut", (STRPTR)"X", 0, 0, (APTR)M_CUT },
+    { NM_ITEM, (STRPTR)"Paste", (STRPTR)"V", 0, 0, (APTR)M_PASTE },
+    { NM_ITEM, (STRPTR)"Copy selected message", (STRPTR)"B", 0, 0, (APTR)M_COPYMSG },
     { NM_END, NULL, NULL, 0, 0, NULL }
 };
 #define BASE_MENU_ITEMS ((int)(sizeof(g_newmenu) / sizeof(g_newmenu[0])) - 1)
 
-enum { SEC_FAV, SEC_CHAN, SEC_DM, SEC_N };
-static const char *g_sec_names[SEC_N] = { "Favorites", "Channels", "Direct messages" };
+enum { SEC_FAV, SEC_CHAN, SEC_DM, SEC_ROOMS, SEC_N };
+static const char *g_sec_names[SEC_N] = { "Favorites", "Non favorites", "Direct messages", "Rooms" };
 
 enum { DIRTY_SIDE = 1, DIRTY_CHAT = 2, DIRTY_HEADER = 4 };
+
+typedef struct {
+    RcRoomList rooms; RcMsgList msgs;
+    char *members,*presence,*draft;
+    char cur_rid[64],loading_rid[64],topic[256],username[96],host[256],anchor_id[64],presence_user_id[64],status[256];
+    char unread_anchor[96],marker_room[64]; ar_ms read_boundary; int boundary_unread;
+    int connected,busy,history_pending,history_exhausted,send_pending,room_serial,download_pending;
+    ar_ms tz_ms; int tz_known,anchor_line,chat_top,chat_follow,cursor;
+    char dock_snapshot[256];
+    RcMsgList events; int event_serial,last_error; char connection_text[256];
+    int generation,collapsed[SEC_N],expanded,reconnecting;
+} ServerState;
 
 typedef struct {
     struct Screen *scr;
@@ -138,7 +185,29 @@ typedef struct {
     ViewPens pens;
     LONG     obtained[TC_COUNT + 8 + EMOJI_COLOURS];
     int      n_obtained;
-    struct Hook render_hook, idcmp_hook, edit_hook;
+    struct Hook render_hook, idcmp_hook, filter_hook;
+    struct ChangeListener editor_listener;
+    struct IClass *editor_class;
+    volatile int editor_action;
+    struct TextFont *chat_font, *code_font;
+    char filter[96], compose_label[200];
+    struct { char user[96]; Buf bytes; Object *picture; int attempted, failed, size; struct BitMap *bitmap; char path[96]; } avatars[64];
+    int avatar_count, avatar_pending, avatar_generation;
+    struct { char *url; Buf bytes; Object *picture; struct BitMap *bitmap; int width, height, expanded, loading; char path[96]; } images[8];
+    int image_generation;
+    int prefs_only, running_client, session_override, plugins_dirty, panel_depth, defer_display, last_unread;
+    PrefsEndpoint *prefs_service;
+    char *presence;
+    char presence_user_id[64];
+    STRPTR reopen_draft;
+    int composer_overlong;
+    char anchor_id[64];
+    int anchor_line, history_pending, history_exhausted, send_pending, room_serial;
+    char unread_anchor[96],marker_room[64]; ar_ms read_boundary; int boundary_unread;
+    int download_pending;
+    Object *transfer_text; struct Window *transfer_win;
+    ULONG transfer_serial; int transfer_dialog,transfer_rc,transfer_cancelled,transfer_save_offer; char transfer_status[256],transfer_progress_text[256];
+    volatile int filter_changed;
     volatile int input_changed;   /* set by the string edit hook */
     char     hook_buf[INPUT_MAX + 1];  /* input text as of the last key */
     volatile int hook_pos;        /* cursor position as of the last key */
@@ -146,8 +215,6 @@ typedef struct {
     volatile int sugg_close;      /* Esc */
     int      sugg_sel;
     volatile int last_key;        /* last raw key the edit hook saw (shown in the panel) */
-    int      click_seen[G_COUNT]; /* click already handled via notification */
-    ULONG    last_click_ms[G_COUNT];
     BYTE     dirty_sig;
     ULONG    dirty;            /* DIRTY_* bits */
     int      chat_relayout;
@@ -158,10 +225,19 @@ typedef struct {
     int      n_sugg;
     int      sugg_at, sugg_end;  /* '@' position and cursor in the input text */
 
+    struct MsgPort *app_port; struct DiskObject *app_icon;
+    int iconified,menu_rebuild;
+    int multi,active_server,server_view;
+    int settings_override,server_overrides;
+    int focus_slot,focus_visible; char focus_rid[64];
+    int side_menu_pending,side_menu_slot,side_menu_x,side_menu_y;
+    ServerState servers[PREFS_SERVERS_MAX];
     Prefs prefs;
     RcRoomList rooms;
     RcMsgList msgs;
     char cur_rid[64];
+    char copy_id[96], copy_rid[64];
+    int copy_chat, copy_file;
     char loading_rid[64];
     char username[96];
     char host[256];
@@ -179,12 +255,258 @@ typedef struct {
 
 static Gui G;
 
+static void server_legacy_load(int slot)
+{
+    ServerPrefs *p=&G.prefs.servers[slot];
+    ar_strlcpy(G.prefs.server,p->url,sizeof(G.prefs.server)); ar_strlcpy(G.prefs.user,p->user,sizeof(G.prefs.user));
+    ar_strlcpy(G.prefs.user_id,p->user_id,sizeof(G.prefs.user_id)); ar_strlcpy(G.prefs.token,p->token,sizeof(G.prefs.token));
+    G.prefs.verify=p->verify; G.prefs.remember=p->remember;
+}
+static void server_legacy_save(void)
+{
+    ServerPrefs *p;
+    if(!G.multi) return;
+    p=&G.prefs.servers[G.active_server];
+    ar_strlcpy(p->url,G.prefs.server,sizeof(p->url)); ar_strlcpy(p->user,G.prefs.user,sizeof(p->user));
+    ar_strlcpy(p->user_id,G.prefs.user_id,sizeof(p->user_id)); ar_strlcpy(p->token,G.prefs.token,sizeof(p->token));
+    p->verify=G.prefs.verify; p->remember=G.prefs.remember; G.prefs.servers_defined=1;
+}
+static const char *server_display(int slot);
+static void server_event(int slot,int error,const char *text);
+static void server_context_popup(void);
+static void sidebar_pointer(struct IntuiMessage *im);
+static void server_select(int slot);
+static void server_reconfigure(const Prefs *next);
+static int server_connect(int slot,int interactive);
+static void notify_dock_state(void);
+static void dock_room_delta(int slot,const RcRoomList *delta);
+static void tree_rebuild(void);
+static int server_background(NetMsg *m);
+
+static void mark_dirty(ULONG what);
+static void send_cmd(NetMsg *m);
+
+static void avatar_drop_pictures(void)
+{
+    int i;
+    for (i = 0; i < G.avatar_count; i++) {
+        if (G.avatars[i].picture) DisposeDTObject(G.avatars[i].picture);
+        if (G.avatars[i].path[0]) { DeleteFile(G.avatars[i].path); G.avatars[i].path[0] = 0; }
+        G.avatars[i].picture = NULL; G.avatars[i].bitmap = NULL;
+        G.avatars[i].failed = 0;
+    }
+}
+
+static void avatar_reset(void)
+{
+    int i;
+    avatar_drop_pictures();
+    for (i = 0; i < G.avatar_count; i++) buf_free(&G.avatars[i].bytes);
+    memset(G.avatars, 0, sizeof(G.avatars));
+    G.avatar_count = G.avatar_pending = 0; G.avatar_generation++;
+    ar_free(G.presence); G.presence = NULL;
+}
+
+static int picture_dimensions_ok(const unsigned char *p, size_t n, unsigned long maxside, unsigned long maxpixels)
+{
+    unsigned long w = 0, h = 0;
+    if (n >= 24 && !memcmp(p, "\211PNG\r\n\032\n", 8)) {
+        w = ((unsigned long)p[16]<<24) | ((unsigned long)p[17]<<16) | ((unsigned long)p[18]<<8) | p[19];
+        h = ((unsigned long)p[20]<<24) | ((unsigned long)p[21]<<16) | ((unsigned long)p[22]<<8) | p[23];
+    } else if (n >= 10 && !memcmp(p,"GIF8",4)) {
+        w = p[6] | ((unsigned long)p[7]<<8); h = p[8] | ((unsigned long)p[9]<<8);
+    } else if (n > 4 && p[0] == 255 && p[1] == 216) {
+        size_t i = 2;
+        while (i + 4 < n) {
+            unsigned marker, len;
+            if (p[i++] != 255) return 0;
+            while (i < n && p[i] == 255) i++;
+            if (i >= n) return 0;
+            marker = p[i++];
+            if (marker == 217 || marker == 218) break;
+            if (marker == 1 || (marker >= 208 && marker <= 215)) continue;
+            if (i + 2 > n) break;
+            len = (p[i]<<8) | p[i+1];
+            if (len < 2 || len > n-i) return 0;
+            if (marker >= 192 && marker <= 207 && marker != 196 && marker != 200 && marker != 204 && len >= 7) {
+                h = (p[i+3]<<8) | p[i+4]; w = (p[i+5]<<8) | p[i+6]; break;
+            }
+            i += len;
+        }
+    }
+    return w > 0 && h > 0 && w <= maxside && h <= maxside && w * h <= maxpixels;
+}
+
+static struct BitMap *avatar_get(const char *user, int size)
+{
+    int i;
+    if (!DataTypesBase || !user || !*user || strlen(user) >= 96) return NULL;
+    for (i = 0; i < G.avatar_count; i++) if (!strcmp(G.avatars[i].user, user) && G.avatars[i].size == size) break;
+    if (i == G.avatar_count) {
+        if (i == 64) return NULL;
+        ar_strlcpy(G.avatars[i].user, user, sizeof(G.avatars[i].user));
+        int j;
+        buf_init(&G.avatars[i].bytes); G.avatars[i].size = size;
+        for (j = 0; j < G.avatar_count; j++) if (!strcmp(G.avatars[j].user, user)) {
+            G.avatars[i].attempted = G.avatars[j].attempted;
+            if (G.avatars[j].bytes.len) {
+                size_t total = 0; int k;
+                for (k = 0; k < G.avatar_count; k++) total += G.avatars[k].bytes.len;
+                if (total + G.avatars[j].bytes.len <= 2UL * 1024UL * 1024UL)
+                    buf_append(&G.avatars[i].bytes, G.avatars[j].bytes.data, G.avatars[j].bytes.len);
+            }
+            break;
+        }
+        G.avatar_count++;
+    }
+    if (!G.avatars[i].attempted && G.connected && !G.avatar_pending) {
+        NetMsg *m = netmsg_new(NC_AVATAR);
+        if (m) {
+            m->a_user = ar_strdup(user); m->a_interval = G.avatar_generation;
+            if (m->a_user) { G.avatars[i].attempted = 1; G.avatar_pending = 1; send_cmd(m); }
+            else netmsg_free(m);
+        }
+    }
+    if (G.avatars[i].size != size) {
+        if (G.avatars[i].picture) DisposeDTObject(G.avatars[i].picture);
+        if (G.avatars[i].path[0]) { DeleteFile(G.avatars[i].path); G.avatars[i].path[0] = 0; }
+        G.avatars[i].picture = NULL; G.avatars[i].bitmap = NULL;
+        G.avatars[i].failed = 0; G.avatars[i].size = size;
+    }
+    if (G.avatars[i].bytes.len && !picture_dimensions_ok((unsigned char *)G.avatars[i].bytes.data, G.avatars[i].bytes.len, 1024, 1024UL * 1024UL))
+        G.avatars[i].failed = 1;
+    if (G.avatars[i].bytes.len && !G.avatars[i].picture && !G.avatars[i].failed) {
+        Object *picture = NewDTObject(NULL,
+            DTA_SourceType, DTST_MEMORY, DTA_SourceAddress, (ULONG)G.avatars[i].bytes.data,
+            DTA_SourceSize, (ULONG)G.avatars[i].bytes.len, DTA_GroupID, GID_PICTURE,
+            PDTA_DestMode, PMODE_V43, PDTA_FreeSourceBitMap, TRUE, PDTA_Remap, TRUE, PDTA_Screen, (ULONG)G.scr, TAG_END);
+        /* OS 3.2 picture datatypes may not implement DTST_MEMORY. */
+        if (!picture) {
+            char path[96]; BPTR f, lock;
+            snprintf(path, sizeof(path), "T:AmiRocket-avatar-%08lx-%d.image", (unsigned long)FindTask(NULL), i);
+            lock = Lock(path, ACCESS_READ);
+            if (lock) UnLock(lock);
+            else if ((f = Open(path, MODE_NEWFILE)) != 0) {
+                LONG wrote = Write(f, G.avatars[i].bytes.data, (LONG)G.avatars[i].bytes.len);
+                LONG closed = Close(f);
+                ar_strlcpy(G.avatars[i].path, path, sizeof(G.avatars[i].path));
+                if (wrote == (LONG)G.avatars[i].bytes.len && closed)
+                    picture = NewDTObject((APTR)path, DTA_SourceType, DTST_FILE, DTA_GroupID, GID_PICTURE,
+                        PDTA_DestMode, PMODE_V43, PDTA_FreeSourceBitMap, TRUE,
+                        PDTA_Remap, TRUE, PDTA_Screen, (ULONG)G.scr, TAG_END);
+            }
+        }
+        if (picture) {
+            struct BitMapHeader *header = NULL;
+            GetDTAttrs(picture, PDTA_BitMapHeader, (ULONG)&header, TAG_END);
+            if (header && header->bmh_Width <= 1024 && header->bmh_Height <= 1024 &&
+                DoMethod(picture, PDTM_SCALE, size, size, 0) &&
+                DoDTMethod(picture, NULL, NULL, DTM_PROCLAYOUT, NULL, TRUE)) {
+                GetDTAttrs(picture, PDTA_DestBitMap, (ULONG)&G.avatars[i].bitmap, TAG_END);
+                if (G.avatars[i].bitmap && (GetBitMapAttr(G.avatars[i].bitmap, BMA_WIDTH) < (ULONG)size ||
+                    GetBitMapAttr(G.avatars[i].bitmap, BMA_HEIGHT) < (ULONG)size)) G.avatars[i].bitmap = NULL;
+            }
+            if (G.avatars[i].bitmap) G.avatars[i].picture = picture;
+            else DisposeDTObject(picture);
+        }
+        if (!G.avatars[i].picture) {
+            G.avatars[i].failed = 1;
+            if (G.avatars[i].path[0]) { DeleteFile(G.avatars[i].path); G.avatars[i].path[0] = 0; }
+        }
+    }
+    return G.avatars[i].bitmap;
+}
+
+static int user_presence(const char *user)
+{
+    const char *p = G.presence;
+    size_t n = strlen(user);
+    while (p && *p) {
+        const char *end = strchr(p, '\n'), *tab;
+        if (!end) end = p + strlen(p);
+        tab = memchr(p, '\t', (size_t)(end - p));
+        if (tab && (size_t)(tab-p) == n && !ar_strncasecmp(p,user,n)) {
+            size_t len = (size_t)(end-tab-1); const char *status = tab + 1;
+            if (len == 6 && !strncmp(status,"online",6)) return 1;
+            if (len == 4 && !strncmp(status,"away",4)) return 2;
+            if (len == 4 && !strncmp(status,"busy",4)) return 3;
+            return 0;
+        }
+        p = *end ? end + 1 : end;
+    }
+    return 0;
+}
+
+static void on_avatar(NetMsg *m)
+{
+    int i;
+    if (m->a_interval != G.avatar_generation) return;
+    G.avatar_pending = 0;
+    { size_t bytes = 0;
+      for (i = 0; i < G.avatar_count; i++) bytes += G.avatars[i].bytes.len;
+      for (i = 0; i < G.avatar_count; i++) if (m->a_user && !strcmp(G.avatars[i].user, m->a_user)) {
+        G.avatars[i].attempted = 1;
+        if (m->rc == RC_OK && !G.avatars[i].bytes.len && bytes + m->avatar.len <= 2UL * 1024UL * 1024UL) {
+            if (buf_append(&G.avatars[i].bytes, m->avatar.data, m->avatar.len) == 0) bytes += m->avatar.len;
+        }
+      }
+    }
+    mark_dirty(DIRTY_SIDE | DIRTY_CHAT);
+}
+
+static void on_presence(NetMsg *m)
+{
+    if (strcmp(m->user_id, G.presence_user_id)) return;
+    ar_free(G.presence); G.presence = NULL;
+    if (m->rc == RC_OK) { G.presence = m->members; m->members = NULL; }
+    mark_dirty(DIRTY_SIDE);
+}
+
 /* ---- helpers ------------------------------------------------------- */
 
 static void to_latin1(Buf *b, const char *utf8, int multiline)
 {
     if (utf8)
         utf8_to_latin1(b, utf8, multiline);
+}
+
+static int prefs_save_client_state(void)
+{
+    Prefs *p = ar_malloc(sizeof(*p)); int rc;
+    if (!p) return -1;
+    server_legacy_save();
+    if(prefs_lock()<0) { ar_free(p); return -1; }
+    if(prefs_load(p)==-2) { prefs_unlock(); ar_free(p); return -1; }
+    ar_strlcpy(p->server,G.prefs.server,sizeof(p->server)); ar_strlcpy(p->user,G.prefs.user,sizeof(p->user));
+    ar_strlcpy(p->user_id,G.prefs.user_id,sizeof(p->user_id)); ar_strlcpy(p->token,G.prefs.token,sizeof(p->token));
+    p->remember = G.prefs.remember; p->verify = G.prefs.verify;
+    if(G.multi) {
+        int i; prefs_migrate_servers(p);
+        for(i=0;i<PREFS_SERVERS_MAX;i++) {
+            const ServerPrefs *live=&G.prefs.servers[i]; ServerPrefs *saved=&p->servers[i];
+            if(!G.session_override && !saved->url[0] && live->url[0]) *saved=*live;
+            if(saved->url[0] && !strcmp(saved->url,live->url)) {
+                ar_strlcpy(saved->user,live->user,sizeof(saved->user));
+                ar_strlcpy(saved->user_id,live->user_id,sizeof(saved->user_id)); ar_strlcpy(saved->token,live->token,sizeof(saved->token));
+                saved->remember=live->remember; saved->verify=live->verify;
+            }
+        }
+    }
+
+    { int i,j,mask; char key[64],value[64];
+      snprintf(value,sizeof(value),"%d",G.active_server); prefs_set(p,"workspace.server",value);
+      snprintf(value,sizeof(value),"%d",G.server_view); prefs_set(p,"workspace.events",value);
+      for(i=0;i<PREFS_SERVERS_MAX;i++) {
+          if(!G.prefs.servers[i].url[0] || strcmp(G.prefs.servers[i].url,p->servers[i].url)) continue;
+          mask=G.servers[i].expanded; for(j=0;j<SEC_N;j++) mask|=G.servers[i].collapsed[j]<<(j+1);
+          snprintf(key,sizeof(key),"workspace.%d.tree",i); snprintf(value,sizeof(value),"%d",mask); prefs_set(p,key,value);
+          snprintf(key,sizeof(key),"workspace.%d.room",i); prefs_set(p,key,i==G.active_server?G.cur_rid:G.servers[i].cur_rid);
+      }
+      prefs_set(p,"workspace.sidebar",prefs_extra(&G.prefs,"workspace.sidebar","30"));
+    }
+    p->win_left = G.prefs.win_left; p->win_top = G.prefs.win_top; p->win_width = G.prefs.win_width; p->win_height = G.prefs.win_height;
+    prefs_service_publish(G.prefs_service,&G.prefs);
+    rc = prefs_save(p); prefs_unlock(); memset(p,0,sizeof(*p)); ar_free(p); return rc;
 }
 
 static void request(const char *title, const char *text)
@@ -212,7 +534,7 @@ static void request_utf8(const char *title, const char *utf8)
 static void set_status(const char *latin1)
 {
     ar_strlcpy(G.status, latin1, sizeof(G.status));
-    if (G.win)
+    if (G.win && G.g[G_STATUS])
         SetGadgetAttrs((struct Gadget *)G.g[G_STATUS], G.win, NULL, GA_Text, (ULONG)G.status, TAG_END);
 }
 
@@ -251,16 +573,20 @@ static void room_label(Buf *b, const RcRoom *r, int counts)
     if (r->type == 'd') {
         const char *comma = strchr(r->name, ',');
         if (comma) {
-            Buf first;
-            const char *p;
-            int others = 0;
-            buf_init(&first);
-            buf_append(&first, r->name, (size_t)(comma - r->name));
-            for (p = comma; p; p = strchr(p + 1, ','))
-                others++;
-            to_latin1(b, ar_trim(first.data ? first.data : (char *)""), 0);
-            buf_printf(b, " +%d", others);
-            buf_free(&first);
+            const char *q = r->name;
+            int shown = 0;
+            while (*q) {
+                const char *end = strchr(q, ',');
+                size_t n = end ? (size_t)(end - q) : strlen(q);
+                if (!(strlen(G.username) == n && !ar_strncasecmp(q, G.username, n))) {
+                    Buf part; buf_init(&part); buf_append(&part, q, n);
+                    if (shown++) buf_puts(b, ", ");
+                    to_latin1(b, buf_str(&part), 0); buf_free(&part);
+                }
+                if (!end) break;
+                q = end + 1;
+            }
+            if (!shown) to_latin1(b, r->name, 0);
         } else {
             to_latin1(b, r->name, 0);
             if (G.username[0] && !ar_strcasecmp(r->name, G.username))
@@ -281,11 +607,12 @@ static void mark_dirty(ULONG what);
 
 static void update_title(void)
 {
-    const RcRoom *r = G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
+    const RcRoom *r = !G.server_view && G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
     Buf b;
 
     buf_init(&b);
     buf_puts(&b, "AmiRocket");
+    if(G.multi && G.prefs.server[0]) { buf_puts(&b," - "); buf_puts(&b,server_display(G.active_server)); }
     if (r) {
         buf_puts(&b, " - ");
         room_label(&b, r, 0);
@@ -305,10 +632,21 @@ static void update_title(void)
         buf_puts(&b, G.connected ? "Select a room" : "Not connected");
     }
     ar_strlcpy(G.roomhdr, buf_str(&b), sizeof(G.roomhdr));
-    buf_free(&b);
+
     if (G.win)
         SetWindowTitles(G.win, (STRPTR)G.title, (STRPTR)~0);
     mark_dirty(DIRTY_HEADER);
+    buf_clear(&b);
+    buf_puts(&b, "Message ");
+    if (r) room_label(&b, r, 0); else buf_puts(&b, "(select a room)");
+    ar_strlcpy(G.compose_label, buf_str(&b), sizeof(G.compose_label));
+    mark_dirty(DIRTY_HEADER);
+    buf_free(&b);
+    if(G.win && G.g[G_INPUT] && G.g[G_SEND]) {
+        SetGadgetAttrs((struct Gadget *)G.g[G_INPUT],G.win,NULL,GA_Disabled,G.multi && G.server_view,TAG_END);
+        SetGadgetAttrs((struct Gadget *)G.g[G_SEND],G.win,NULL,GA_Disabled,G.multi && G.server_view,TAG_END);
+    }
+
 }
 
 /* Local wall-clock time from the Amiga clock (local since 1978). */
@@ -344,7 +682,13 @@ static void update_tz(ar_ms server_now)
     G.tz_known = 1;
 }
 
+static int conversation_visible(void);
+static void sync_conversation_focus(void);
+static int main_iconify(void);
+static int main_restore(void);
+static void remember_window(void);
 static void cmd_open_room(const char *rid);
+static void unread_resolve(void);
 
 /* ---- views --------------------------------------------------------- */
 
@@ -357,9 +701,8 @@ static void free_list(struct List *l)
 
 static int room_section(const RcRoom *r)
 {
-    if (r->favorite)
-        return SEC_FAV;
-    return r->type == 'd' ? SEC_DM : SEC_CHAN;
+    if(r->type=='d') return SEC_DM;
+    return r->favorite ? SEC_FAV : SEC_CHAN;
 }
 
 static const RcRoomList *g_sort_rooms;
@@ -399,15 +742,34 @@ static void set_scroller(int id, int top, int visible, int total)
 static void draw_side(void)
 {
     struct IBox box;
+    struct TextFont *old_font;
     if (!area_box(G.g[G_ROOMS], &box))
         return;
+    old_font = G.win->RPort->Font;
+    if (G.chat_font) SetFont(G.win->RPort, G.chat_font);
+    { int i, last;
+      G.side.visible = box.Height / (G.win->RPort->TxHeight + 5);
+      side_scroll_to(&G.side, G.side.top);
+      last = G.side.top + G.side.visible;
+      for (i = G.side.top; i < G.side.n && i < last; i++) {
+          SRow *row = &G.side.r[i];
+          row->bitmap = NULL;
+          if (row->is_dm && !row->participants && (!G.multi || row->server_slot==G.active_server)) {
+              row->presence = (UBYTE)user_presence(row->avatar_user);
+              row->bitmap = G.prefs.show_avatars ? avatar_get(row->avatar_user, G.win->RPort->TxHeight + 4) : NULL;
+          }
+      }
+    }
+    G.side.no_avatars = !G.prefs.show_avatars;
     side_draw(&G.side, G.win->RPort, &box, &G.pens);
+    SetFont(G.win->RPort, old_font);
     set_scroller(G_SIDESCROLL, G.side.top, G.side.visible, G.side.n);
+    { struct IntuiMessage point={0}; point.Class=IDCMP_MOUSEMOVE; point.MouseX=G.win->MouseX; point.MouseY=G.win->MouseY; sidebar_pointer(&point); }
 }
 
 static int sugg_row_h(void)
 {
-    return G.win->RPort->TxHeight + 6;
+    return (G.chat_font ? G.chat_font->tf_YSize : G.win->RPort->TxHeight) + 6;
 }
 
 /* "People" panel over the bottom of the message view, like the desktop
@@ -428,7 +790,7 @@ static void draw_suggestions(const struct IBox *box)
     SetAPen(rp, p->side_bg);
     RectFill(rp, left + 1, top + 1, right - 1, box->Top + box->Height - 2);
     SetBPen(rp, p->side_bg);
-    SetAPen(rp, p->dim);
+    SetAPen(rp, p->side_dim);
     SetSoftStyle(rp, FSF_BOLD, AskSoftStyle(rp));
     Move(rp, left + 8, top + base);
     if (G.sugg_kind == 1)
@@ -439,7 +801,7 @@ static void draw_suggestions(const struct IBox *box)
     {
         char hint[80];
         int hl, hw;
-        snprintf(hint, sizeof(hint), "Up/Down select  Return insert  Esc close   [key $%02X]", (unsigned)(G.last_key & 0xFF));
+        snprintf(hint, sizeof(hint), "Up/Down select | Return/Tab insert | Esc close");
         hl = (int)strlen(hint);
         hw = TextLength(rp, (CONST_STRPTR)hint, (ULONG)hl);
         if (right - 8 - hw > left + 8 + TextLength(rp, (CONST_STRPTR)"People", 6) + 16) {
@@ -460,10 +822,10 @@ static void draw_suggestions(const struct IBox *box)
         if (G.sugg_kind == 1) {
             int es = view_emoji_size(rp);
             Buf c;
-            view_emoji(rp, p, x, y + (rh - es) / 2, G.sugg[i].emoji);
+            if (G.prefs.show_emoji) view_emoji(rp, p, x, y + (rh - es) / 2, G.sugg[i].emoji);
             buf_init(&c);
             buf_printf(&c, ":%s:", G.sugg[i].user);
-            SetAPen(rp, p->text);
+            SetAPen(rp, i == G.sugg_sel ? p->side_sel_text : p->side_text);
             SetSoftStyle(rp, FSF_BOLD, AskSoftStyle(rp));
             Move(rp, x + es + 8, y + base);
             Text(rp, (CONST_STRPTR)buf_str(&c), (ULONG)c.len);
@@ -472,7 +834,7 @@ static void draw_suggestions(const struct IBox *box)
             continue;
         }
         /* presence dot */
-        SetAPen(rp, G.sugg[i].online ? p->avatar[2] : p->dim);
+        SetAPen(rp, G.sugg[i].online ? p->avatar[2] : (i == G.sugg_sel ? p->side_sel_dim : p->side_dim));
         RectFill(rp, x, y + (rh - dot) / 2, x + dot - 1, y + (rh - dot) / 2 + dot - 1);
         if (!G.sugg[i].online) {
             SetAPen(rp, i == G.sugg_sel ? p->side_sel : p->side_bg);
@@ -481,7 +843,7 @@ static void draw_suggestions(const struct IBox *box)
         x += dot + 8;
         buf_init(&b);
         to_latin1(&b, G.sugg[i].user, 0);
-        SetAPen(rp, p->text);
+        SetAPen(rp, i == G.sugg_sel ? p->side_sel_text : p->side_text);
         SetSoftStyle(rp, FSF_BOLD, AskSoftStyle(rp));
         Move(rp, x, y + base);
         Text(rp, (CONST_STRPTR)buf_str(&b), (ULONG)b.len);
@@ -492,14 +854,14 @@ static void draw_suggestions(const struct IBox *box)
             buf_putc(&b, '(');
             to_latin1(&b, G.sugg[i].name, 0);
             buf_putc(&b, ')');
-            SetAPen(rp, p->dim);
+            SetAPen(rp, i == G.sugg_sel ? p->side_sel_dim : p->side_dim);
             Move(rp, x, y + base);
             Text(rp, (CONST_STRPTR)buf_str(&b), (ULONG)b.len);
         }
         if (G.sugg[i].recent) {
             static const char rec[] = "recent";
             int w = TextLength(rp, (CONST_STRPTR)rec, 6);
-            SetAPen(rp, p->dim);
+            SetAPen(rp, i == G.sugg_sel ? p->side_sel_dim : p->side_dim);
             Move(rp, right - 8 - w, y + base);
             Text(rp, (CONST_STRPTR)rec, 6);
         }
@@ -509,37 +871,110 @@ static void draw_suggestions(const struct IBox *box)
     SetBPen(rp, p->bg);
 }
 
+static void load_older(void);
+static void transfer_dialog(NetMsg *m);
+static void download_attachment(int message, int file);
+static void composer_capture(void);
+static void composer_set(const char *text, int cursor);
+
+static void remember_anchor(void)
+{
+    int row = G.chat.top, first, m;
+    if(G.server_view) return;
+    if (G.anchor_id[0]) return;
+    if (G.chat.follow || row < 0 || row >= G.chat.n) return;
+    m = G.chat.v[row].msg_index;
+    if (m < 0 || m >= G.msgs.count) return;
+    first = row;
+    while (first > 0 && G.chat.v[first - 1].msg_index == m) first--;
+    ar_strlcpy(G.anchor_id, G.msgs.items[m].id, sizeof(G.anchor_id));
+    G.anchor_line = row - first;
+}
+
+static void application_event(const char *,const char *,const char *,const char *);
+static void msgs_rebuild(int scroll_bottom);
+static void remember_anchor(void);
+#include "inline_images.inc"
+
 static void draw_chat(void)
 {
     struct IBox box;
+    struct TextFont *old_font;
+    const RcMsgList *messages=(G.multi && G.server_view)?&G.servers[G.active_server].events:&G.msgs;
     if (!area_box(G.g[G_MSGS], &box))
         return;
+    old_font = G.win->RPort->Font;
+    if (G.chat_font) SetFont(G.win->RPort, G.chat_font);
+    G.chat.unread_id=G.server_view?NULL:G.unread_anchor;
+    G.chat.code_font = G.code_font;
+    G.chat.no_emoji = !G.prefs.show_emoji; G.chat.no_avatars = !G.prefs.show_avatars || G.server_view;
+    G.chat.inline_images = G.prefs.inline_images && !G.server_view;
+    if(G.server_view) G.chat.nimages=0; else image_view_update();
     if (G.chat_relayout || G.chat.width != box.Width) {
         ar_ms now = amiga_local_ms();
-        const char *empty = !G.connected ? "Not connected"
+        const char *empty = G.server_view ? "Server events - right-click the server for actions" : !G.connected ? "Not connected"
                           : !G.cur_rid[0] ? "Select a room"
                           : G.loading_rid[0] ? "Loading messages..." : "No messages yet";
-        chat_layout(&G.chat, G.win->RPort, box.Width, &G.msgs, G.tz_ms, ms_day_number(now),
+        chat_layout(&G.chat, G.win->RPort, box.Width, messages, G.tz_ms, ms_day_number(now),
                     G.username, empty);
+        if (G.anchor_id[0]) {
+            int j;
+            for (j = 0; j < G.chat.n; j++) {
+                int m = G.chat.v[j].msg_index;
+                if (m >= 0 && m < G.msgs.count && !strcmp(G.msgs.items[m].id, G.anchor_id)) {
+                    int k = j;
+                    while (k + 1 < G.chat.n && G.chat.v[k + 1].msg_index == m && k - j < G.anchor_line) k++;
+                    G.chat.top = k; G.chat.follow = 0; break;
+                }
+            }
+            G.anchor_id[0] = 0;
+        }
         G.chat_relayout = 0;
     }
     chat_draw(&G.chat, G.win->RPort, &box, &G.pens);
+    { int row, size = G.chat.line_h * 2 - 4;
+      for (row = G.chat.top; row < G.chat.n && row < G.chat.top + G.chat.visible; row++) {
+        const VLine *line = &G.chat.v[row];
+        if (!G.server_view && G.prefs.show_avatars && line->kind == VL_HEADER && line->msg_index >= 0 && line->msg_index < G.msgs.count) {
+            struct BitMap *bitmap = avatar_get(G.msgs.items[line->msg_index].username, size);
+            int y = box.Top + (row - G.chat.top) * G.chat.line_h + 1;
+            int height = box.Top + box.Height - y;
+            if (height > size) height = size;
+            if (bitmap && height > 0) BltBitMapRastPort(bitmap, 0, 0, G.win->RPort, box.Left + 6, y, size, height, 0xC0);
+        }
+      }
+    }
+    if (!G.server_view && G.copy_chat && !strcmp(G.copy_rid, G.cur_rid)) {
+        int row;
+        SetAPen(G.win->RPort, G.pens.accent);
+        for (row = G.chat.top; row < G.chat.n && row < G.chat.top + G.chat.visible; row++) {
+            int m = G.chat.v[row].msg_index;
+            if (m >= 0 && m < G.msgs.count && !strcmp(G.msgs.items[m].id, G.copy_id)) {
+                int y = box.Top + (row - G.chat.top) * G.chat.line_h;
+                RectFill(G.win->RPort, box.Left, y, box.Left + 2, y + G.chat.line_h - 1);
+            }
+        }
+    }
     set_scroller(G_CHATSCROLL, G.chat.top, G.chat.visible, G.chat.n);
     if (G.n_sugg)
         draw_suggestions(&box);
+    SetFont(G.win->RPort, old_font);
 }
 
 static void draw_header(void)
 {
     struct IBox box;
-    const RcRoom *r = G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
+    const RcRoom *r = !G.server_view && G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
     Buf t, tp;
 
     if (!area_box(G.g[G_ROOMHDR], &box))
         return;
     buf_init(&t);
     buf_init(&tp);
-    if (r) {
+    if(G.multi && G.server_view) {
+        buf_puts(&t,server_display(G.active_server));
+        to_latin1(&tp,G.servers[G.active_server].connection_text,0);
+    } else if (r) {
         room_label(&t, r, 0);
         to_latin1(&tp, G.topic, 0);
     } else {
@@ -548,6 +983,8 @@ static void draw_header(void)
     header_draw(G.win->RPort, &box, &G.pens, buf_str(&t), buf_str(&tp), r ? r->favorite : 0);
     buf_free(&t);
     buf_free(&tp);
+    if (area_box(G.g[G_COMPOSELABEL], &box))
+        composer_draw(G.win->RPort, &box, &G.pens, G.compose_label);
 }
 
 static void redraw_dirty(void)
@@ -584,6 +1021,7 @@ static void scroll_chat(int top)
 {
     chat_scroll_to(&G.chat, top);
     draw_chat();
+    if (top <= 0) load_older();
 }
 
 static int over(Object *o, WORD mx, WORD my)
@@ -592,102 +1030,128 @@ static int over(Object *o, WORD mx, WORD my)
     return area_box(o, &b) && mx >= b.Left && mx < b.Left + b.Width && my >= b.Top && my < b.Top + b.Height;
 }
 
+static void rooms_rebuild(void);
 static void update_suggestions(void);
 static void redraw_dirty(void);
-static void on_side_click(void);
-static void on_chat_click(void);
+static void on_side_click(int x,int y);
+static void on_chat_click(int x, int y);
 
 static int is_name_char(unsigned char c);
 
 /* Runs inside the edit hook: replaces the "@pre" word before the cursor in
  * the work buffer with the selected suggestion (already Latin-1, with a
  * trailing space) and puts the cursor after it. */
-static int hook_complete(struct SGWork *sgw)
+static void editor_wake(void)
 {
-    char *wb = (char *)sgw->WorkBuffer;
-    const char *ins;
-    int pos, at, n, il, tail, max;
+    G.input_changed = 1;
+    if (G.dirty_sig >= 0 && G.port)
+        Signal((struct Task *)G.port->mp_SigTask, 1UL << G.dirty_sig);
+}
+static void editor_char(struct ChangeListener *l, ULONG ch) { editor_wake(); }
+static void editor_change(struct ChangeListener *l, ULONG a, ULONG b, ULONG c, ULONG d) { editor_wake(); }
 
-    if (!wb || G.sugg_sel < 0 || G.sugg_sel >= G.n_sugg)
-        return 0;
-    ins = G.sugg[G.sugg_sel].ins;
-    il = (int)strlen(ins);
-    n = sgw->NumChars;
-    pos = sgw->BufferPos > n ? n : sgw->BufferPos;
-    at = pos;
-    while (at > 0 && is_name_char((unsigned char)wb[at - 1]))
-        at--;
-    if (at == 0 || (wb[at - 1] != '@' && wb[at - 1] != ':') || !il)
-        return 0;
-    at--;                          /* include the '@' or ':' */
-    tail = n - pos;
-    max = (sgw->StringInfo ? sgw->StringInfo->MaxChars : INPUT_MAX + 1) - 1;
-    if (at + il + tail > max)
-        return 0;
-    memmove(wb + at + il, wb + pos, (size_t)tail);
-    memcpy(wb + at, ins, (size_t)il);
-    sgw->NumChars = at + il + tail;
-    wb[sgw->NumChars] = 0;
-    sgw->BufferPos = at + il;
-    sgw->EditOp = EO_BIGCHANGE;
-    return 1;
+enum { EDITOR_NONE, EDITOR_INSERT, EDITOR_DISMISS, EDITOR_SEND, EDITOR_NEWLINE };
+
+static int editor_key(UWORD key, UWORD qualifier)
+{
+    int consumed = 0;
+    if ((key == 0x44 || key == 0x43) &&
+        (qualifier & (IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND))) {
+        G.editor_action = EDITOR_SEND; consumed = 1;
+    } else if (key == 0x44 || key == 0x43) {
+        G.editor_action = (qualifier & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT))
+                          ? EDITOR_NEWLINE : G.n_sugg ? EDITOR_INSERT : EDITOR_SEND;
+        consumed = 1;
+    } else if (G.n_sugg) {
+        if (key == 0x4C) { G.sugg_move--; consumed = 1; }
+        else if (key == 0x4D) { G.sugg_move++; consumed = 1; }
+        else if (key == 0x42) { G.editor_action = EDITOR_INSERT; consumed = 1; }
+        else if (key == 0x45) { G.editor_action = EDITOR_DISMISS; consumed = 1; }
+    }
+    return consumed;
 }
 
-/* String edit hook on the input line. Intuition calls it for every key
- * (in input.device's context), after its own editing: only note what
- * happened and wake the main loop, which reads the text itself. */
-static ULONG edit_hook_func(struct Hook *h, struct SGWork *sgw, ULONG *msg)
+/* texteditor consumes arrows before window.class can report RAWKEY.
+ * Intercept composer and popup keys; defer all UI changes to our task. */
+static ULONG editor_dispatch(struct IClass *cl, Object *o, Msg msg)
 {
-    if (*msg != SGH_KEY)
-        return 0;
-    /* string.gadget cannot report the cursor position (STRINGA_BufferPos
-     * is not gettable on OS 3.x), so keep our own copy of text and cursor */
-    if (sgw->WorkBuffer) {
-        int n = sgw->NumChars;
-        if (n < 0)
-            n = 0;
-        if (n > INPUT_MAX)
-            n = INPUT_MAX;
-        memcpy(G.hook_buf, sgw->WorkBuffer, (size_t)n);
-        G.hook_buf[n] = 0;
-        G.hook_pos = sgw->BufferPos > n ? n : sgw->BufferPos;
-    }
-    if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY)
-        G.last_key = sgw->IEvent->ie_Code;
-    if (sgw->IEvent && sgw->IEvent->ie_Class == IECLASS_RAWKEY && G.n_sugg &&
-        !(sgw->IEvent->ie_Code & IECODE_UP_PREFIX)) {
-        UWORD code = sgw->IEvent->ie_Code;
-        int n = G.n_sugg;
-        if (code == 0x4C || code == 0x4D) {          /* cursor up / down */
-            G.sugg_sel = (G.sugg_sel + (code == 0x4C ? n - 1 : 1)) % n;
-            sgw->Actions &= ~(SGA_END | SGA_BEEP);
-        } else if (code == 0x45) {                   /* Esc */
-            G.sugg_close = 1;
-            sgw->Actions &= ~(SGA_END | SGA_BEEP);
-        } else if (code == 0x44 || code == 0x43 || code == 0x42) {  /* Return, Enter, Tab */
-            /* insert the name right here, so the field stays active with
-             * the cursor after "@name " instead of ending and coming back */
-            if (hook_complete(sgw))
-                sgw->Actions = (sgw->Actions & ~(SGA_END | SGA_BEEP | SGA_NEXTACTIVE | SGA_PREVACTIVE)) |
-                               SGA_USE | SGA_REDISPLAY;
-            G.n_sugg = 0;
-            G.sugg_close = 1;
-        }
-        if (sgw->WorkBuffer) {
-            int k = sgw->NumChars < 0 ? 0 : sgw->NumChars > INPUT_MAX ? INPUT_MAX : sgw->NumChars;
-            memcpy(G.hook_buf, sgw->WorkBuffer, (size_t)k);
-            G.hook_buf[k] = 0;
-            G.hook_pos = sgw->BufferPos > k ? k : sgw->BufferPos;
+    if (msg->MethodID == GM_HANDLEINPUT) {
+        struct gpInput *gp = (struct gpInput *)msg;
+        const struct InputEvent *ie = gp->gpi_IEvent;
+        if (ie && ie->ie_Class == IECLASS_RAWKEY && !(ie->ie_Code & IECODE_UP_PREFIX)) {
+            if (editor_key(ie->ie_Code, ie->ie_Qualifier)) { editor_wake(); return GMR_MEACTIVE; }
         }
     }
-    G.input_changed = 1;
-    if (G.dirty_sig >= 0)
-        Signal((struct Task *)G.port->mp_SigTask, 1UL << G.dirty_sig);
+    return DoSuperMethodA(cl, o, msg);
+}
+
+static ULONG filter_hook_func(struct Hook *h, struct SGWork *sgw, ULONG *msg)
+{
+    if (*msg != SGH_KEY) return 0;
+    G.filter_changed = 1;
+    if (G.dirty_sig >= 0) Signal((struct Task *)G.port->mp_SigTask, 1UL << G.dirty_sig);
     return ~0UL;
 }
 
+static void composer_capture(void)
+{
+    STRPTR text;
+    ULONG x = 0, y = 0;
+    int pos = 0;
+    if (!G.win || !G.g[G_INPUT]) return;
+    text = (STRPTR)DoGadgetMethod((struct Gadget *)G.g[G_INPUT], G.win, NULL, GM_TEXTEDITOR_ExportText, NULL);
+    if (!text) return;
+    G.composer_overlong = strlen((char *)text) > INPUT_MAX;
+    ar_strlcpy(G.hook_buf, text, sizeof(G.hook_buf));
+    FreeVec(text);
+    GetAttr(GA_TEXTEDITOR_CursorX, G.g[G_INPUT], &x);
+    GetAttr(GA_TEXTEDITOR_CursorY, G.g[G_INPUT], &y);
+    while (y && G.hook_buf[pos]) if (G.hook_buf[pos++] == '\n') y--;
+    while (x && G.hook_buf[pos] && G.hook_buf[pos] != '\n') { pos++; x--; }
+    G.hook_pos = pos;
+}
+
+static void composer_set(const char *text, int cursor)
+{
+    int i, x = 0, y = 0;
+    SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL,
+                   GA_TEXTEDITOR_Contents, (ULONG)text, TAG_END);
+    for (i = 0; i < cursor && text[i]; i++) { if (text[i] == '\n') { y++; x = 0; } else x++; }
+    SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL,
+                   GA_TEXTEDITOR_CursorY, y, GA_TEXTEDITOR_CursorX, x, TAG_END);
+    ar_strlcpy(G.hook_buf, text, sizeof(G.hook_buf)); G.hook_pos = cursor;
+}
+
+static void cmd_send_input(void);
+static void complete_suggestion(int i);
+static void hide_suggestions(void);
+
 static void input_events(void)
 {
+    if (G.editor_action || G.sugg_move) {
+        int action = G.editor_action, move = G.sugg_move;
+        G.editor_action = EDITOR_NONE; G.sugg_move = 0; G.input_changed = 0;
+        if (G.n_sugg && move) {
+            G.sugg_sel = ((G.sugg_sel + move) % G.n_sugg + G.n_sugg) % G.n_sugg;
+            mark_dirty(DIRTY_CHAT);
+        }
+        if (action == EDITOR_INSERT && G.n_sugg) { composer_capture(); complete_suggestion(G.sugg_sel); }
+        else if (action == EDITOR_DISMISS) hide_suggestions();
+        else if (action == EDITOR_SEND) cmd_send_input();
+        else if (action == EDITOR_NEWLINE) {
+            hide_suggestions();
+            DoGadgetMethod((struct Gadget *)G.g[G_INPUT], G.win, NULL,
+                           GM_TEXTEDITOR_InsertText, NULL, "\n", GV_TEXTEDITOR_InsertText_Cursor);
+            editor_wake();
+        }
+    }
+    if (G.filter_changed && G.win) {
+        STRPTR value = NULL;
+        G.filter_changed = 0;
+        GetAttr(STRINGA_TextVal, G.g[G_FILTER], (ULONG *)&value);
+        ar_strlcpy(G.filter, value ? (char *)value : "", sizeof(G.filter));
+        G.side.top = 0; rooms_rebuild();
+    }
     if (G.sugg_close) {
         G.sugg_close = 0;
         G.sugg_move = 0;
@@ -699,6 +1163,7 @@ static void input_events(void)
     if (G.input_changed) {
         G.input_changed = 0;
         G.sugg_move = 0;
+        composer_capture();
         update_suggestions();
         if (G.n_sugg)
             mark_dirty(DIRTY_CHAT);   /* the hook may have moved the selection */
@@ -709,26 +1174,24 @@ static void input_events(void)
  * from inside RA_HandleInput(). */
 static ULONG idcmp_hook_func(struct Hook *h, APTR obj, struct IntuiMessage *im)
 {
-    if (im->Class == IDCMP_IDCMPUPDATE) {
+    sidebar_pointer(im);
+    if ((im->Class == IDCMP_MOUSEBUTTONS && im->Code == SELECTDOWN) ||
+        im->Class == IDCMP_GADGETDOWN) {
+        struct IBox box;
+        /* Layout may own the IntuiMessage.IAddress for a nested gadget.
+         * Match the drawn bounds, not that pointer. Read-only spaces also
+         * allow ordinary window mouse-button events on OS 3.x. */
+        if (over(G.g[G_INPUT], im->MouseX, im->MouseY)) { G.copy_chat = 0; mark_dirty(DIRTY_CHAT); }
+        if (over(G.g[G_ROOMS], im->MouseX, im->MouseY) && area_box(G.g[G_ROOMS], &box))
+            on_side_click(im->MouseX-box.Left,im->MouseY - box.Top);
+        else if (over(G.g[G_MSGS], im->MouseX, im->MouseY) && area_box(G.g[G_MSGS], &box))
+            on_chat_click(im->MouseX - box.Left, im->MouseY - box.Top);
+        redraw_dirty();
+    } else if (im->Class == IDCMP_IDCMPUPDATE) {
         struct TagItem *tags = (struct TagItem *)im->IAddress;
         struct TagItem *ti = FindTagItem(GA_ID, tags), *top = FindTagItem(SCROLLER_Top, tags);
-        if (ti && (ti->ti_Data == G_ROOMS || ti->ti_Data == G_MSGS) && FindTagItem(SPACE_MouseY, tags)) {
-            /* space.gadget reports clicks as notifications with the mouse
-             * position; it may repeat them while the button is held, so act
-             * once per 300 ms */
-            ULONG now = im->Seconds * 1000UL + im->Micros / 1000UL;
-            G.click_seen[ti->ti_Data] = 1;
-            if (now - G.last_click_ms[ti->ti_Data] > 300) {
-                G.last_click_ms[ti->ti_Data] = now;
-                if (ti->ti_Data == G_ROOMS)
-                    on_side_click();
-                else
-                    on_chat_click();
-                redraw_dirty();
-            }
-        } else if (ti && ti->ti_Data == G_INPUT) {
-            update_suggestions();
-            redraw_dirty();
+        if (ti && ti->ti_Data == G_INPUT) {
+            editor_wake();
         } else if (ti && top) {
             if (ti->ti_Data == G_SIDESCROLL)
                 scroll_side((int)top->ti_Data);
@@ -746,11 +1209,29 @@ static ULONG idcmp_hook_func(struct Hook *h, APTR obj, struct IntuiMessage *im)
     return 0;
 }
 
+static int room_matches(const RcRoom *r)
+{
+    Buf label;
+    const char *p;
+    size_t n = strlen(G.filter);
+    int found = !n;
+    if (found) return 1;
+    buf_init(&label); room_label(&label, r, 0);
+    for (p = buf_str(&label); *p; p++)
+        if (!ar_strncasecmp(p, G.filter, n)) { found = 1; break; }
+    buf_free(&label); return found;
+}
+
+#include "server_context.inc"
+#include "server_tree.inc"
+#include "dock_state.inc"
+
 static void rooms_rebuild(void)
 {
     int *order, i, s;
     Buf b;
 
+    if(G.multi) { tree_rebuild(); return; }
     side_clear(&G.side);
     order = (int *)ar_malloc(sizeof(int) * (size_t)(G.rooms.count + 1));
     buf_init(&b);
@@ -763,7 +1244,7 @@ static void rooms_rebuild(void)
              * open here; the server re-opens them when a message arrives */
             if (!r->open && strcmp(r->rid, G.cur_rid) != 0)
                 continue;
-            if (room_section(r) == s)
+            if (room_section(r) == s && room_matches(r))
                 order[cnt++] = i;
         }
         if (!cnt)
@@ -778,7 +1259,7 @@ static void rooms_rebuild(void)
             row->collapsed = (UBYTE)G.collapsed[s];
             ar_strlcpy(row->label, g_sec_names[s], sizeof(row->label));
         }
-        if (G.collapsed[s])
+        if (G.collapsed[s] && !G.filter[0])
             continue;
         for (i = 0; i < cnt; i++) {
             const RcRoom *r = &G.rooms.items[order[i]];
@@ -789,8 +1270,13 @@ static void rooms_rebuild(void)
             row->section = (UBYTE)s;
             row->rid = r->rid;
             row->glyph = r->type == 'd' ? '@' : r->type == 'p' ? '*' : '#';
+            row->participants = (WORD)rc_dm_participants(r, G.username);
+            row->is_dm = r->type == 'd';
+            if (row->is_dm && !row->participants)
+                ar_strlcpy(row->avatar_user, r->name, sizeof(row->avatar_user));
             row->selected = !strcmp(r->rid, G.cur_rid);
-            row->bold = r->unread > 0 || r->alert;
+            row->mentions=r->mentions>999?999:r->mentions;
+            row->bold = r->unread > 0 || r->alert || r->mentions;
             row->count = (WORD)(r->unread > 0 ? (r->unread > 999 ? 999 : r->unread) : r->alert ? -1 : 0);
             buf_clear(&b);
             room_label(&b, r, 0);
@@ -808,8 +1294,10 @@ static void rooms_rebuild(void)
 static void msgs_rebuild(int scroll_bottom)
 {
     G.chat_relayout = 1;
-    if (scroll_bottom)
+    if (scroll_bottom) {
+        G.anchor_id[0] = 0;
         G.chat.follow = 1;
+    }
     mark_dirty(DIRTY_CHAT);
 }
 
@@ -873,7 +1361,7 @@ static void update_suggestions(void)
     int at, i, old = G.n_sugg;
     Buf pre;
 
-    if (!G.win || !G.connected || !G.cur_rid[0]) {
+    if (!G.win || !G.connected || !G.cur_rid[0] || G.composer_overlong) {
         hide_suggestions();
         return;
     }
@@ -884,7 +1372,7 @@ static void update_suggestions(void)
     at = (int)pos;
     while (at > 0 && is_name_char((unsigned char)txt[at - 1]))
         at--;
-    if (at == 0 || (txt[at - 1] != '@' && txt[at - 1] != ':') || (at >= 2 && txt[at - 2] != ' ')) {
+    if (at == 0 || (txt[at - 1] != '@' && txt[at - 1] != ':') || (at >= 2 && txt[at - 2] != ' ' && txt[at - 2] != '\n')) {
         hide_suggestions();
         return;
     }
@@ -1000,9 +1488,7 @@ static void complete_suggestion(int i)
     {
         int cursor = (int)b.len;
         buf_puts(&b, (const char *)txt + G.sugg_end);
-        SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL,
-                       STRINGA_TextVal, (ULONG)buf_str(&b),
-                       STRINGA_BufferPos, (ULONG)cursor, TAG_END);
+        composer_set(buf_str(&b), cursor);
         ar_strlcpy(G.hook_buf, buf_str(&b), sizeof(G.hook_buf));
         G.hook_pos = cursor;
     }
@@ -1010,49 +1496,140 @@ static void complete_suggestion(int i)
     buf_free(&u);
     hide_suggestions();
     ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
-    /* activating may mark the whole text on OS 3.2; setting the cursor
-     * again drops the mark and leaves it after "@name " */
-    SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL,
-                   STRINGA_BufferPos, (ULONG)G.hook_pos, TAG_END);
+
 }
 
-static void on_chat_click(void)
+static int shell_argument(Buf *cmd, const char *text)
+{
+    const unsigned char *p;
+    if (!text || !*text) return 0;
+    for (p = (const unsigned char *)text; *p; p++) if (*p < 32 || *p == 127) return 0;
+    buf_putc(cmd, '"');
+    for (p = (const unsigned char *)text; *p; p++) { if (*p == '*' || *p == '"') buf_putc(cmd, '*'); buf_putc(cmd, *p); }
+    buf_putc(cmd, '"'); return !cmd->oom;
+}
+
+/* Background shells must own their streams. Otherwise their exit can close
+ * the client's inherited CLI handles after Preferences Use/Save returns. */
+static LONG launch_helper(const char *command)
+{
+    BPTR input=Open("NIL:",MODE_OLDFILE), output=Open("NIL:",MODE_NEWFILE); LONG rc;
+    if(!input || !output) { if(input) Close(input); if(output) Close(output); return -1; }
+    rc=SystemTags(command,SYS_Asynch,TRUE,SYS_UserShell,TRUE,SYS_Input,input,SYS_Output,output,NP_StackSize,131072,TAG_END);
+    if(rc<0) { Close(input); Close(output); }
+    return rc;
+}
+
+/* Pass only HTTP(S) URLs as a single escaped Amiga shell argument. */
+static int web_link_command(Buf *cmd, const char *url)
+{
+    const unsigned char *p;
+    if (ar_strncasecmp(url, "http://", 7) && ar_strncasecmp(url, "https://", 8)) return 0;
+    if (strlen(url) > 4096) return 0;
+    for (p = (const unsigned char *)url; *p; p++) if (*p <= 32 || *p == 127) return 0;
+    if (!shell_argument(cmd, G.prefs.browser)) return 0;
+    buf_puts(cmd, " \"");
+    for (p = (const unsigned char *)url; *p; p++) {
+        if (*p == '*' || *p == '"') buf_putc(cmd, '*');
+        buf_putc(cmd, *p);
+    }
+    buf_putc(cmd, '"'); return !cmd->oom;
+}
+
+static void open_web_link(const char *url)
+{
+    Buf cmd; BPTR lock;
+    buf_init(&cmd);
+    if (!G.prefs.open_links) { set_status("Web links disabled in Plugins preferences"); return; }
+    if (!web_link_command(&cmd, url)) { buf_free(&cmd); set_status("Cannot open this link"); return; }
+    lock = Lock(G.prefs.browser, ACCESS_READ);
+    if (!lock) request("Open web link", "Configure an installed browser helper in AmiRocketPrefs / Plugins. OpenURL also needs a configured Amiga web browser.");
+    else {
+        UnLock(lock);
+        if (launch_helper(buf_str(&cmd)) < 0) request("Open web link", "OpenURL could not be started.");
+        else set_status("Opening link in web browser...");
+    }
+    buf_free(&cmd);
+}
+
+static void on_chat_click(int x, int y)
 {
     struct IBox box;
     int rh, rows, top, i;
 
-    if (!G.n_sugg || !area_box(G.g[G_MSGS], &box))
+    if (!area_box(G.g[G_MSGS], &box)) return;
+    if(G.server_view) return;
+    if (!G.n_sugg) {
+        const char *url = chat_link_hit(&G.chat, x, y);
+        if (url) { open_web_link(url); return; }
+        int message, file, row = G.chat.line_h > 0 ? G.chat.top + y / G.chat.line_h : -1;
+        if (y >= 0 && row >= 0 && row < G.chat.n) {
+            message = G.chat.v[row].msg_index;
+            if (message >= 0 && message < G.msgs.count) {
+                ar_strlcpy(G.copy_id, G.msgs.items[message].id, sizeof(G.copy_id));
+                ar_strlcpy(G.copy_rid, G.cur_rid, sizeof(G.copy_rid));
+                G.copy_chat = 1; mark_dirty(DIRTY_CHAT);
+                set_status("Message selected - Amiga+C copies text");
+            }
+        }
+        if (chat_file_hit(&G.chat, y, &message, &file)) {
+            G.copy_file = file;
+            if (G.msgs.items[message].files[file].image && G.prefs.inline_images) image_toggle(message, file);
+            else download_attachment(message, file);
+        }
         return;
+    }
     rh = sugg_row_h();
     rows = G.n_sugg + 1;
-    top = box.Top + box.Height - rows * rh - 2;
-    i = (G.win->MouseY - top) / rh - 1;
-    if (G.win->MouseY >= top && i >= 0 && i < G.n_sugg)
+    top = box.Height - rows * rh - 2;
+    i = (y - top) / rh - 1;
+    if (y >= top && i >= 0 && i < G.n_sugg)
         complete_suggestion(i);
     else
         hide_suggestions();
 }
 
-static void on_side_click(void)
+static void on_side_click(int x,int y)
 {
     struct IBox box;
     int i;
 
     if (!area_box(G.g[G_ROOMS], &box))
         return;
-    i = side_hit(&G.side, G.win->MouseY - box.Top);
+    if (y < 0 || y >= box.Height)
+        return;
+    i = side_hit(&G.side, y);
     if (i < 0)
         return;
+    if(G.multi) {
+        SRow row=G.side.r[i]; char rid[64]; int slot=row.server_slot;
+        if(row.kind==SR_SERVER) {
+            int expanded=G.servers[slot].expanded;
+            if(slot!=G.active_server) server_select(slot);
+            if(x<24) G.servers[slot].expanded=!expanded;
+            G.server_view=1; G.copy_chat=0; G.n_sugg=0;
+            rooms_rebuild(); msgs_rebuild(1); update_title(); return;
+        }
+        if(row.kind==SR_SECTION) { G.servers[slot].collapsed[row.section]=!G.servers[slot].collapsed[row.section]; rooms_rebuild(); return; }
+        ar_strlcpy(rid,row.rid?row.rid:"",sizeof(rid));
+        if(slot!=G.active_server) { server_select(slot); rooms_rebuild(); if(!rid[0]) return;
+            for(i=0;i<G.side.n;i++) if(G.side.r[i].server_slot==slot && G.side.r[i].rid && !strcmp(G.side.r[i].rid,rid)) break;
+            if(i==G.side.n) return;
+        }
+    }
     if (G.side.r[i].kind == SR_SECTION) {
         int s = G.side.r[i].section;
         G.collapsed[s] = !G.collapsed[s];
         rooms_rebuild();
         return;
     }
-    if (G.side.r[i].kind != SR_ROOM || !G.side.r[i].rid || !strcmp(G.side.r[i].rid, G.cur_rid))
-        return;
+    if(G.side.r[i].kind!=SR_ROOM || !G.side.r[i].rid) return;
+    if(G.server_view) { G.server_view=0; G.chat.width=0; msgs_rebuild(0); update_title(); }
+    if(!strcmp(G.side.r[i].rid,G.cur_rid)) return;
     ar_strlcpy(G.cur_rid, G.side.r[i].rid, sizeof(G.cur_rid));
     G.topic[0] = 0;
+    G.history_pending = G.history_exhausted = 0;
+    G.anchor_id[0] = 0;
     ar_free(G.members);
     G.members = NULL;
     G.n_sugg = 0;
@@ -1068,30 +1645,176 @@ static void on_side_click(void)
 
 static void send_cmd(NetMsg *m)
 {
+    m->server_slot=G.active_server;
+    m->server_generation=G.multi ? G.servers[G.active_server].generation : 0;
     G.pending++;
     worker_send(m);
 }
 
-static void cmd_connect_token(void)
+static void load_older(void)
 {
-    NetMsg *m = netmsg_new(NC_CONNECT);
-    if (!m)
-        return;
-    m->a_url = ar_strdup(G.prefs.server);
-    m->a_uid = ar_strdup(G.prefs.user_id);
-    m->a_token = ar_strdup(G.prefs.token);
-    m->a_verify = G.prefs.verify;
-    set_status("Connecting with saved login...");
-    set_busy(1);
-    send_cmd(m);
+    NetMsg *m;
+    if (G.server_view || !G.connected || !G.cur_rid[0] || G.loading_rid[0] || G.history_pending || G.history_exhausted || !G.msgs.count) return;
+    if (G.msgs.count >= MAX_MESSAGES) { set_status("History limit reached (1000 messages); reopen the room for latest messages"); return; }
+    m = netmsg_new(NC_HISTORY); if (!m) return;
+    m->a_rid = ar_strdup(G.cur_rid);
+    m->a_before = G.msgs.items[0].ts_ms;
+    m->a_interval = G.room_serial;
+    if (!m->a_rid) { netmsg_free(m); return; }
+    G.history_pending = 1;
+    set_status("Loading older messages..."); send_cmd(m);
 }
+
+static void on_older(NetMsg *m)
+{
+    ar_ms earliest;
+    int count;
+    if (strcmp(m->rid, G.cur_rid) || m->a_interval != G.room_serial) return;
+    G.history_pending = 0;
+    if (m->rc != RC_OK) { set_status_utf8(m->text[0] ? m->text : rc_strerror(m->rc)); return; }
+    earliest = G.msgs.count ? G.msgs.items[0].ts_ms : 0;
+    count = m->msgs.count;
+    remember_anchor();
+    rc_msglist_merge(&G.msgs, &m->msgs, MAX_MESSAGES);
+    G.history_exhausted = count < 50 || (G.msgs.count && G.msgs.items[0].ts_ms >= earliest);
+    unread_resolve();
+    msgs_rebuild(0);
+    set_status(G.history_exhausted ? "Beginning of room history" : "Older messages loaded - scroll up for more");
+}
+
+static void download_attachment(int message, int file)
+{
+    const RcAttachment *a;
+    struct FileRequester *fr;
+    char name[128], path[512],save_title[128],file_size[48];
+    Buf title;
+    NetMsg *m;
+    int i, j = 0;
+    if (G.download_pending) { set_status("An attachment is already downloading"); return; }
+    if (message < 0 || message >= G.msgs.count || file < 0 || file >= G.msgs.items[message].file_count) return;
+    a = &G.msgs.items[message].files[file];
+    if(view_attachment_limit(a,0)) { request("Attachment too large",view_attachment_limit(a,0)); return; }
+    buf_init(&title); to_latin1(&title, a->title, 0);
+    for (i = 0; buf_str(&title)[i] && j < (int)sizeof(name) - 1; i++) {
+        unsigned char c = (unsigned char)buf_str(&title)[i];
+        if (c >= 32 && c != ':' && c != '/' && c != '\\' && c != '\"' && c != '*') name[j++] = (char)c;
+    }
+    name[j] = 0; buf_free(&title);
+    if (!name[0] || !strcmp(name, ".") || !strcmp(name, "..")) strcpy(name, "attachment");
+    view_file_size(file_size,sizeof(file_size),a->size);
+    snprintf(save_title,sizeof(save_title),"Save attachment (%s; maximum 8 MiB)",file_size);
+    fr = AllocAslRequestTags(ASL_FileRequest, ASLFR_Window, (ULONG)G.win,
+            ASLFR_TitleText, (ULONG)save_title, ASLFR_DoSaveMode, TRUE,
+            ASLFR_InitialFile, (ULONG)name, TAG_END);
+    if (!fr) return;
+    if (!AslRequestTags(fr, TAG_END)) { FreeAslRequest(fr); return; }
+    ar_strlcpy(path, fr->fr_Drawer, sizeof(path));
+    if (!AddPart(path, fr->fr_File, sizeof(path)) || !fr->fr_File[0] || strpbrk(path, "\r\n")) {
+        FreeAslRequest(fr); request("AmiRocket", "Invalid or overly long filename"); return;
+    }
+    FreeAslRequest(fr);
+    { BPTR existing = Lock(path, ACCESS_READ);
+      if (existing) {
+          struct EasyStruct es = { sizeof(es), 0, (STRPTR)"Replace attachment", (STRPTR)"Replace the existing file?", (STRPTR)"Replace|Cancel" };
+          UnLock(existing); if (EasyRequest(G.win, &es, NULL) != 1) return;
+      }
+    }
+    m = netmsg_new(NC_DOWNLOAD); if (!m) return;
+    m->a_url = ar_strdup(a->url); m->a_text = ar_strdup(path);
+    m->a_verify = a->image && G.prefs.preview_images;
+    if (!m->a_url || !m->a_text) { netmsg_free(m); return; }
+    transfer_dialog(m);
+}
+
+static void on_downloaded(NetMsg *m)
+{
+    G.download_pending = 0;
+    if(G.transfer_dialog) { G.transfer_rc=m->rc; ar_strlcpy(G.transfer_status,m->text[0]?m->text:rc_strerror(m->rc),sizeof(G.transfer_status)); }
+    if (m->rc != RC_OK) { if(G.transfer_dialog) return; request_utf8("Attachment download failed", m->text[0] ? m->text : rc_strerror(m->rc)); return; }
+    set_status(m->text[0] ? m->text : "Attachment saved");
+    if (m->a_verify) {
+        Buf cmd; const char *p;
+        buf_init(&cmd);
+        if (!shell_argument(&cmd, G.prefs.image_viewer)) { buf_free(&cmd); return; }
+        buf_puts(&cmd, " \"");
+        for (p = m->a_text; *p; p++) {
+            if (*p == '*' || *p == '\"') buf_putc(&cmd, '*');
+            buf_putc(&cmd, *p);
+        }
+        buf_putc(&cmd, '\"');
+        if (!cmd.oom && launch_helper(buf_str(&cmd)) < 0)
+            request("AmiRocket", "File saved. MultiView could not be started; open the saved image manually.");
+        buf_free(&cmd);
+    }
+}
+
+static void load_chat_font(void)
+{
+    struct TextFont *font = NULL;
+    if (G.prefs.chat_font[0]) {
+        struct TextAttr ta;
+        ta.ta_Name = (STRPTR)G.prefs.chat_font; ta.ta_YSize = (UWORD)G.prefs.chat_font_size;
+        ta.ta_Style = FS_NORMAL; ta.ta_Flags = FPF_DISKFONT;
+        font = OpenDiskFont(&ta);
+    }
+    if (G.chat_font) CloseFont(G.chat_font);
+    G.chat_font = font;
+    if (G.code_font) CloseFont(G.code_font);
+    { struct TextAttr ta = { (STRPTR)"courier.font", (UWORD)(font ? font->tf_YSize : 13), FS_NORMAL, FPF_DISKFONT };
+      G.code_font = OpenDiskFont(&ta);
+      if (G.code_font && (G.code_font->tf_Flags & FPF_PROPORTIONAL)) { CloseFont(G.code_font); G.code_font = NULL; }
+      if (!G.code_font) { ta.ta_Name = (STRPTR)"topaz.font"; ta.ta_YSize = 8; ta.ta_Flags = 0; G.code_font = OpenFont(&ta); }
+    }
+    mark_dirty(DIRTY_SIDE);
+}
+
+static void __attribute__((unused)) choose_chat_font(void)
+{
+    struct FontRequester *fr = AllocAslRequestTags(ASL_FontRequest,
+        ASLFO_Window, (ULONG)G.win, ASLFO_TitleText, (ULONG)"Chat font",
+        ASLFO_InitialName, (ULONG)(G.prefs.chat_font[0] ? G.prefs.chat_font : "helvetica.font"),
+        ASLFO_InitialSize, G.prefs.chat_font_size, ASLFO_MinHeight, 8, ASLFO_MaxHeight, 48,
+        ASLFO_DoStyle, FALSE, ASLFO_DoDrawMode, FALSE, TAG_END);
+    if (!fr) return;
+    if (AslRequestTags(fr, TAG_END)) {
+        remember_anchor();
+        ar_strlcpy(G.prefs.chat_font, fr->fo_Attr.ta_Name, sizeof(G.prefs.chat_font));
+        G.prefs.chat_font_size = fr->fo_Attr.ta_YSize;
+        load_chat_font(); prefs_save_client_state(); msgs_rebuild(0);
+    }
+    FreeAslRequest(fr);
+}
+
+static int conversation_visible(void)
+{
+    return G.win && (G.win->Flags&WFLG_WINDOWACTIVE) && !G.server_view && G.connected && G.cur_rid[0] && !G.loading_rid[0];
+}
+static void sync_conversation_focus(void)
+{
+    int visible=conversation_visible(); NetMsg *m;
+    if(!G.running_client) return;
+    if(G.focus_slot==G.active_server && G.focus_visible==visible && !strcmp(G.focus_rid,G.cur_rid)) return;
+    m=netmsg_new(NC_SET_FOCUS); if(!m) return;
+    m->a_interval=visible; m->a_rid=ar_strdup(G.cur_rid);
+    G.focus_slot=G.active_server; G.focus_visible=visible; ar_strlcpy(G.focus_rid,G.cur_rid,sizeof(G.focus_rid));
+    send_cmd(m);
+    if(visible) { int i; for(i=0;i<G.rooms.count;i++) if(!strcmp(G.rooms.items[i].rid,G.cur_rid)) G.rooms.items[i].unread=G.rooms.items[i].alert=G.rooms.items[i].mentions=0; rooms_rebuild(); notify_unread(); }
+}
+
+#include "unread.inc"
 
 static void cmd_open_room(const char *rid)
 {
+    unread_capture(rid);
+    ar_strlcpy(G.loading_rid,rid,sizeof(G.loading_rid));
+    sync_conversation_focus();
     NetMsg *m = netmsg_new(NC_OPEN_ROOM);
     if (!m)
         return;
     m->a_rid = ar_strdup(rid);
+    m->a_interval = ++G.room_serial;
+    G.history_pending = G.history_exhausted = 0;
+    G.anchor_id[0] = 0;
     ar_strlcpy(G.loading_rid, rid, sizeof(G.loading_rid));
     set_status("Loading messages...");
     send_cmd(m);
@@ -1111,7 +1834,14 @@ static void cmd_send_input(void)
     Buf b;
     char *t;
 
-    GetAttr(STRINGA_TextVal, G.g[G_INPUT], (ULONG *)&txt);
+    if (G.send_pending || G.server_view) return;
+    composer_capture();
+    { STRPTR all = (STRPTR)DoGadgetMethod((struct Gadget *)G.g[G_INPUT], G.win, NULL, GM_TEXTEDITOR_ExportText, NULL);
+      if (!all) return;
+      if (strlen((char *)all) > INPUT_MAX) { FreeVec(all); request("AmiRocket", "Message is too long (maximum 4000 characters)."); return; }
+      FreeVec(all);
+    }
+    txt = (STRPTR)G.hook_buf;
     if (!txt || !*txt)
         return;
     if (!G.connected || !G.cur_rid[0]) {
@@ -1133,15 +1863,106 @@ static void cmd_send_input(void)
     }
     m->a_rid = ar_strdup(G.cur_rid);
     m->a_text = t;
+    if(!m->a_rid) { netmsg_free(m); set_status("Not sent: out of memory; draft kept"); return; }
+    G.send_pending = 1;
     send_cmd(m);
-    SetGadgetAttrs((struct Gadget *)G.g[G_INPUT], G.win, NULL, STRINGA_TextVal, (ULONG)"", TAG_END);
-    G.hook_buf[0] = 0;
-    G.hook_pos = 0;
-    hide_suggestions();
     ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
 }
 
 /* ---- login window -------------------------------------------------- */
+
+static int text_xy_index(const char *text, ULONG x, ULONG y)
+{
+    int i = 0; ULONG row = 0, col = 0;
+    while (text[i] && row < y) { if (text[i++] == '\n') row++; }
+    while (text[i] && text[i] != '\n' && col < x) { i++; col++; }
+    return i;
+}
+static void toolbar_format(const char *before, const char *after, const char *placeholder)
+{
+    ULONG sx = ~0UL, sy = ~0UL, ex = ~0UL, ey = ~0UL; int start, end; Buf b;
+    composer_capture(); if (G.composer_overlong) return;
+    start = end = G.hook_pos;
+    DoGadgetMethod((struct Gadget *)G.g[G_INPUT], G.win, NULL, GM_TEXTEDITOR_BlockInfo, NULL, &sx, &sy, &ex, &ey);
+    if (sx != ~0UL && sy != ~0UL && ex != ~0UL && ey != ~0UL) {
+        int a = text_xy_index(G.hook_buf, sx, sy), z = text_xy_index(G.hook_buf, ex, ey);
+        if (a != z) { start = a < z ? a : z; end = a > z ? a : z; }
+    }
+    buf_init(&b); buf_append(&b, G.hook_buf, start); buf_puts(&b, before);
+    if (end > start) buf_append(&b, G.hook_buf + start, end - start); else buf_puts(&b, placeholder);
+    buf_puts(&b, after); buf_puts(&b, G.hook_buf + end);
+    if (!b.oom && b.len <= INPUT_MAX) { composer_set(buf_str(&b), start + strlen(before)); editor_wake(); }
+    else set_status("Message would exceed 4000 characters");
+    buf_free(&b); G.copy_chat = 0;
+    ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
+}
+
+static void apply_preferences(const Prefs *next,int permanent);
+static long plugin_get(void *context,const char *key,char *out,long size)
+{
+    char full[96]; if(!key || strlen(key)>31) return -1;
+    snprintf(full,sizeof(full),"plugin.%s.%s",(const char *)context,key);
+    return prefs_get(&G.prefs,full,out,size);
+}
+static long plugin_set(void *context,const char *key,const char *value)
+{
+    char full[96]; if(!key || strlen(key)>31) return -1;
+    snprintf(full,sizeof(full),"plugin.%s.%s",(const char *)context,key);
+    if(prefs_set(&G.prefs,full,value)<0) return -1;
+    G.session_override=1; G.plugins_dirty=1; prefs_service_publish(G.prefs_service,&G.prefs); return 0;
+}
+static long plugin_insert(void *context,const char *text)
+{
+    Buf b; int pos; (void)context;
+    if(!G.win || !text) return -1;
+    composer_capture(); if(G.composer_overlong) return -1;
+    pos=G.hook_pos; buf_init(&b); buf_append(&b,G.hook_buf,pos); buf_puts(&b,text); buf_puts(&b,G.hook_buf+pos);
+    if(b.oom || b.len>INPUT_MAX) { buf_free(&b); return -1; }
+    composer_set(buf_str(&b),pos+strlen(text)); buf_free(&b); editor_wake(); return 0;
+}
+static long plugin_selection(void *context,char *out,long size)
+{
+    int i; (void)context; if(!out || size<1) return -1; out[0]=0;
+    if(G.copy_chat && !strcmp(G.copy_rid,G.cur_rid)) for(i=0;i<G.msgs.count;i++) if(!strcmp(G.msgs.items[i].id,G.copy_id)) {
+        Buf plain,latin; buf_init(&plain); buf_init(&latin); md_to_plain(&plain,G.msgs.items[i].text);
+        utf8_to_latin1(&latin,buf_str(&plain),1); ar_strlcpy(out,buf_str(&latin),size); buf_free(&plain); buf_free(&latin); return 0;
+    }
+    composer_capture(); ar_strlcpy(out,G.hook_buf,size); return 0;
+}
+static void plugin_time(void *context,char *out,long size)
+{
+    char hm[8]; (void)context; ms_format_hm(amiga_local_ms(),hm); snprintf(out,size,"[%s] ",hm);
+}
+static void plugin_status(void *context,const char *text) { (void)context; set_status(text); }
+static void publish_plugins(void)
+{
+    char ids[272]="|"; int i;
+    for(i=0;i<plugins_count();i++) { size_t n=strlen(ids); snprintf(ids+n,sizeof(ids)-n,"%s|",plugins_id(i)); }
+    prefs_service_plugins(G.prefs_service,ids);
+}
+static void plugins_start_host(void)
+{
+    ArPluginHost host={AR_PLUGIN_ABI,sizeof(ArPluginHost),NULL,plugin_get,plugin_set,plugin_insert,plugin_selection,plugin_time,plugin_status};
+    plugins_init(&host); plugins_sync(&G.prefs); publish_plugins();
+}
+static void application_event(const char *kind,const char *room,const char *user,const char *text)
+{
+    plugins_event(kind,room,user,text); arexx_event(kind,room,user,text);
+}
+
+static void server_message_event(int slot,const char *rid,const char *user,const char *text)
+{
+    char qualified[84]; snprintf(qualified,sizeof(qualified),"%d:%s",slot+1,rid);
+    application_event("SERVERMESSAGE",qualified,user,text);
+}
+
+
+static void notify_unread(void)
+{
+    int total=dock_total_unread(); char value[24];
+    notify_dock_state();
+    if(total!=G.last_unread) { G.last_unread=total; snprintf(value,sizeof(value),"%d",total); application_event("UNREAD",G.cur_rid,G.username,value); }
+}
 
 static Object *mk_string(int id, const char *init, int maxchars, int password)
 {
@@ -1269,10 +2090,19 @@ static void login_submit(void)
         request("AmiRocket", "Please enter your user name and password.");
         return;
     }
+    if(G.multi && G.prefs.servers[G.active_server].url[0] && strcmp(server,G.prefs.servers[G.active_server].url)) {
+        request("Server","Edit server addresses in Preferences / Servers, or add another server there."); return;
+    }
+    if(G.multi && strcmp(user,G.prefs.user)) {
+        G.servers[G.active_server].generation++; G.prefs.token[0]=G.prefs.user_id[0]=0;
+        avatar_reset(); images_reset(); rc_roomlist_free(&G.rooms); rc_msglist_free(&G.msgs);
+        G.cur_rid[0]=G.loading_rid[0]=G.topic[0]=0; G.connected=0;
+    }
     ar_strlcpy(G.prefs.server, server, sizeof(G.prefs.server));
     ar_strlcpy(G.prefs.user, user, sizeof(G.prefs.user));
     G.prefs.verify = checked(G.g[L_VERIFY]);
     G.prefs.remember = checked(G.g[L_REMEMBER]);
+    server_legacy_save();
 
     m = netmsg_new(NC_CONNECT);
     if (!m)
@@ -1287,6 +2117,7 @@ static void login_submit(void)
     ar_trim(m->a_code);
     m->a_verify = G.prefs.verify;
     ar_strlcpy(G.host, su.host, sizeof(G.host));
+    server_event(G.active_server,0,"Connecting...");
     set_status("Connecting...");
     set_busy(1);
     send_cmd(m);
@@ -1298,12 +2129,16 @@ static void forget_login(void)
 {
     G.prefs.token[0] = 0;
     G.prefs.user_id[0] = 0;
-    prefs_save(&G.prefs);
+    prefs_save_client_state();
 }
 
 static void went_offline(const char *why)
 {
-    G.connected = 0;
+    avatar_reset(); images_reset();
+    G.presence_user_id[0] = 0;
+    G.connected = 0; G.server_view=G.multi;
+    server_event(G.active_server,0,why);
+    application_event("DISCONNECTED","",G.username,why);
     rc_roomlist_free(&G.rooms);
     rc_msglist_free(&G.msgs);
     G.cur_rid[0] = 0;
@@ -1320,7 +2155,9 @@ static void on_connected(NetMsg *m)
     char err[64];
 
     set_busy(0);
+    server_event(G.active_server,m->rc,m->rc==RC_OK?"Connected":m->text[0]?m->text:rc_strerror(m->rc));
     if (m->rc != RC_OK) {
+        G.connected=0; G.server_view=G.multi; G.chat.width=0; rooms_rebuild(); msgs_rebuild(1);
         if (m->rc == RC_ERR_TOTP) {
             if (!G.lwin)
                 login_open("Two-factor code required");
@@ -1337,14 +2174,16 @@ static void on_connected(NetMsg *m)
             if (m->rc == RC_ERR_AUTH)
                 forget_login();
             set_status("Saved login failed");
-            login_open(NULL);
         }
         set_status_utf8(m->text[0] ? m->text : rc_strerror(m->rc));
-        request_utf8("AmiRocket - connection failed", m->text[0] ? m->text : rc_strerror(m->rc));
+        rooms_rebuild(); msgs_rebuild(0);
         return;
     }
+    avatar_reset();
     G.connected = 1;
+    ar_strlcpy(G.presence_user_id, m->user_id, sizeof(G.presence_user_id));
     ar_strlcpy(G.username, m->username, sizeof(G.username));
+    application_event("CONNECTED","",G.username,"");
     if (url_parse_server(G.prefs.server, &su, err, sizeof(err)) == 0)
         ar_strlcpy(G.host, su.host, sizeof(G.host));
     if (G.prefs.remember) {
@@ -1355,19 +2194,21 @@ static void on_connected(NetMsg *m)
     }
     if (!G.prefs.user[0])
         ar_strlcpy(G.prefs.user, m->username, sizeof(G.prefs.user));
-    prefs_save(&G.prefs);
+    prefs_save_client_state();
     login_close();
+    cmd_simple(NC_PRESENCE);
     update_tz(m->server_now);
 
     rc_roomlist_free(&G.rooms);
     G.rooms = m->rooms;
     rc_roomlist_init(&m->rooms);
+    notify_unread();
     rooms_rebuild();
     snprintf(s, sizeof(s), "Connected to %s as %s%s%s", G.host, m->username,
              m->server_version[0] ? " - Rocket.Chat " : "", m->server_version);
     set_status_utf8(s);
 
-    /* reopen the last room, or the first one */
+    /* Restore the conversation without marking it read in the server event view. */
     if (G.cur_rid[0] && find_room(G.cur_rid))
         cmd_open_room(G.cur_rid);
     else if (G.rooms.count > 0) {
@@ -1380,21 +2221,24 @@ static void on_connected(NetMsg *m)
 
 static void on_room_opened(NetMsg *m)
 {
-    if (strcmp(m->rid, G.cur_rid) != 0)
+    if (strcmp(m->rid, G.cur_rid) != 0 || m->a_interval != G.room_serial)
         return;   /* user already moved on */
     G.loading_rid[0] = 0;
     if (m->rc != RC_OK) {
         set_status_utf8(m->text[0] ? m->text : rc_strerror(m->rc));
         return;
     }
+    G.history_exhausted = m->msgs.count < 50;
     rc_msglist_free(&G.msgs);
     rc_msglist_merge(&G.msgs, &m->msgs, MAX_MESSAGES);
+    unread_resolve();
     ar_strlcpy(G.topic, m->topic, sizeof(G.topic));
     ar_free(G.members);
     G.members = m->members;
     m->members = NULL;
     update_tz(m->server_now);
     msgs_rebuild(1);
+    if(G.unread_anchor[0] && !G.server_view) jump_unread();
     mark_dirty(DIRTY_HEADER);
     {
         char s[64];
@@ -1404,28 +2248,43 @@ static void on_room_opened(NetMsg *m)
     {   /* opening marks the room read on the server; show that right away */
         int i;
         for (i = 0; i < G.rooms.count; i++)
-            if (!strcmp(G.rooms.items[i].rid, G.cur_rid)) {
+            if (conversation_visible() && !strcmp(G.rooms.items[i].rid, G.cur_rid)) {
                 G.rooms.items[i].unread = 0;
                 G.rooms.items[i].alert = 0;
+                G.rooms.items[i].mentions = 0;
             }
         rooms_rebuild();
     }
+    if(conversation_visible()) { G.focus_visible=-1; sync_conversation_focus(); }
+    application_event("ROOM",G.cur_rid,G.username,"");
 }
 
 static void on_sent(NetMsg *m)
 {
+    G.send_pending = 0;
     if (m->rc != RC_OK) {
-        request_utf8("AmiRocket - message not sent", m->text[0] ? m->text : rc_strerror(m->rc));
+        server_notice(G.active_server,m->text[0]?m->text:rc_strerror(m->rc));
+        { char qualified[96]; snprintf(qualified,sizeof(qualified),"%d:%s",G.active_server+1,m->rid);
+          application_event("SENDFAILED",qualified,G.username,m->text); }
+        request_utf8("AmiRocket - send failed or unconfirmed", m->text[0] ? m->text : rc_strerror(m->rc));
         return;
     }
+    { Buf current; buf_init(&current); composer_capture();
+      latin1_to_utf8(&current, G.hook_buf);
+      if (!G.composer_overlong && !strcmp(m->rid, G.cur_rid) && !strcmp(ar_trim(current.data ? current.data : (char *)""), m->a_text)) composer_set("", 0);
+      buf_free(&current); hide_suggestions();
+    }
     if (!strcmp(m->rid, G.cur_rid) && m->msgs.count) {
+        remember_anchor();
         rc_msglist_merge(&G.msgs, &m->msgs, MAX_MESSAGES);
         msgs_rebuild(1);
     }
+    if(m->rc==RC_OK) application_event("SENT",m->rid,G.username,m->a_text ? m->a_text : "");
 }
 
 static void on_update(NetMsg *m)
 {
+    dock_room_delta(G.active_server,&m->rooms);
     if (m->rooms.count || m->rooms.n_removed) {
         int i;
         for (i = 0; i < m->rooms.n_removed; i++)
@@ -1438,31 +2297,44 @@ static void on_update(NetMsg *m)
         rc_roomlist_merge(&G.rooms, &m->rooms);
         /* the open room is read as far as we are concerned */
         for (i = 0; i < G.rooms.count; i++)
-            if (!strcmp(G.rooms.items[i].rid, G.cur_rid)) {
+            if (conversation_visible() && !strcmp(G.rooms.items[i].rid, G.cur_rid)) {
                 G.rooms.items[i].unread = 0;
                 G.rooms.items[i].alert = 0;
+                G.rooms.items[i].mentions = 0;
             }
         rooms_rebuild();
     }
+    { int j,k;
+      for(j=0;j<m->msgs.count;j++) {
+        for(k=0;k<G.msgs.count;k++) if(!strcmp(m->msgs.items[j].id,G.msgs.items[k].id)) break;
+        if(k==G.msgs.count) { application_event("MESSAGE",m->rid,m->msgs.items[j].username,m->msgs.items[j].text);
+            if(G.multi) server_message_event(G.active_server,m->rid,m->msgs.items[j].username,m->msgs.items[j].text); }
+      }
+    }
     if ((m->msgs.count || m->msgs.n_deleted) && !strcmp(m->rid, G.cur_rid)) {
+        remember_anchor();
         rc_msglist_merge(&G.msgs, &m->msgs, MAX_MESSAGES);
         msgs_rebuild(G.chat.follow);
         if (G.win && !(G.win->Flags & WFLG_WINDOWACTIVE))
             DisplayBeep(G.scr);
     }
+    unread_resolve();
+    if(conversation_visible() && (m->msgs.count || m->rooms.count)) { G.focus_visible=-1; sync_conversation_focus(); }
+    notify_unread();
     update_tz(m->server_now);
 }
 
 static void on_status(NetMsg *m)
 {
+    server_event(G.active_server,m->rc,m->text); G.servers[G.active_server].reconnecting=m->a_interval>0;
+    if(m->rc==RC_OK) G.servers[G.active_server].last_error=0;
     if (m->rc == RC_ERR_AUTH) {
         forget_login();
         went_offline("Logged out");
-        request_utf8("AmiRocket", m->text);
-        login_open(NULL);
+        server_event(G.active_server,m->rc,m->text); rooms_rebuild();
         return;
     }
-    set_status_utf8(m->text);
+    set_status_utf8(m->text); rooms_rebuild();
 }
 
 static void handle_port(void)
@@ -1471,11 +2343,31 @@ static void handle_port(void)
 
     while ((msg = GetMsg(G.port)) != NULL) {
         NetMsg *m = (NetMsg *)msg;
+        if(G.multi && (m->server_slot<0 || m->server_slot>=PREFS_SERVERS_MAX ||
+            m->server_generation!=G.servers[m->server_slot].generation || m->server_slot!=G.active_server)) {
+            if(m->server_slot>=0 && m->server_slot<PREFS_SERVERS_MAX && m->server_generation==G.servers[m->server_slot].generation) server_background(m);
+            if(msg->mn_Node.ln_Type==NT_REPLYMSG) { G.pending--; netmsg_free(m); } else worker_done(m);
+            rooms_rebuild(); continue;
+        }
         if (msg->mn_Node.ln_Type == NT_REPLYMSG) {
             G.pending--;
             switch (m->kind) {
             case NC_CONNECT:   on_connected(m); break;
             case NC_OPEN_ROOM: on_room_opened(m); break;
+            case NC_HISTORY: on_older(m); break;
+            case NC_AVATAR: on_avatar(m); break;
+            case NC_IMAGE: on_image(m); break;
+            case NC_CREATE_ROOM:
+                if (m->rc != RC_OK) request_utf8("New conversation", m->text[0] ? m->text : rc_strerror(m->rc));
+                else {
+                    rc_roomlist_merge(&G.rooms, &m->rooms); rooms_rebuild();
+                    application_event("ROOMCREATED",m->rid,G.username,"");
+                    ar_strlcpy(G.cur_rid, m->rid, sizeof(G.cur_rid));
+                    rc_msglist_free(&G.msgs); G.topic[0] = 0; update_title(); msgs_rebuild(1); cmd_open_room(m->rid);
+                }
+                break;
+            case NC_PRESENCE: on_presence(m); break;
+            case NC_DOWNLOAD: on_downloaded(m); break;
             case NC_SEND:      on_sent(m); break;
             case NC_LOGOUT:    went_offline("Logged out"); break;
             case NC_DISCONNECT: went_offline("Disconnected"); break;
@@ -1483,12 +2375,23 @@ static void handle_port(void)
             netmsg_free(m);
         } else {
             switch (m->kind) {
+            case NE_TRANSFER:
+                if(G.transfer_dialog && m->sent_at==G.transfer_serial && G.transfer_text && !G.transfer_cancelled) {
+                    char *text=G.transfer_progress_text;
+                    if(m->a_interval>0) snprintf(text,sizeof(G.transfer_progress_text),"Downloading: %ld / %d KiB (%ld%%)",(long)m->a_before/1024,m->a_interval/1024,(long)(m->a_before*100/m->a_interval));
+                    else snprintf(text,sizeof(G.transfer_progress_text),"Downloading: %ld KiB",(long)m->a_before/1024);
+                    SetGadgetAttrs((struct Gadget *)G.transfer_text,G.transfer_win,NULL,GA_Text,(ULONG)text,TAG_END);
+                }
+                break;
+            case NE_RECONNECTED: on_connected(m); break;
             case NE_UPDATE: on_update(m); break;
+            case NE_PRESENCE: on_presence(m); break;
             case NE_STATUS: on_status(m); break;
             }
             worker_done(m);
         }
     }
+    notify_unread();
 }
 
 /* ---- main window --------------------------------------------------- */
@@ -1503,42 +2406,191 @@ static void about(void)
     request("About AmiRocket", G.about);
 }
 
+/* Native clipboard text: IFF FORM FTXT containing a Latin-1 CHRS chunk. */
+static int clipboard_write(const char *text)
+{
+    struct MsgPort *port = CreateMsgPort();
+    struct IOClipReq *io = port ? (struct IOClipReq *)CreateIORequest(port, sizeof(*io)) : NULL;
+    Buf data;
+    ULONG n = (ULONG)strlen(text), header[5];
+    int ok = 0;
+    buf_init(&data);
+    header[0] = 0x464f524d; header[1] = 12 + n + (n & 1);
+    header[2] = 0x46545854; header[3] = 0x43485253; header[4] = n;
+    if (buf_append(&data, header, sizeof(header)) < 0 || buf_append(&data, text, n) < 0 ||
+        ((n & 1) && buf_append(&data, "", 1) < 0)) goto done;
+    if (io && !OpenDevice("clipboard.device", 0, (struct IORequest *)io, 0)) {
+        io->io_Command = CMD_WRITE; io->io_Data = data.data; io->io_Length = data.len;
+        if (!DoIO((struct IORequest *)io) && io->io_Actual == data.len) {
+            io->io_Command = CMD_UPDATE; io->io_Data = NULL; io->io_Length = 0;
+            ok = !DoIO((struct IORequest *)io);
+        }
+        CloseDevice((struct IORequest *)io);
+    }
+done:
+    if (io) DeleteIORequest((struct IORequest *)io);
+    if (port) DeleteMsgPort(port);
+    buf_free(&data); return ok;
+}
+
+static void copy_message(void)
+{
+    int i;
+    if (!strcmp(G.copy_rid, G.cur_rid)) for (i = 0; i < G.msgs.count; i++) {
+        RcMsg *m = &G.msgs.items[i];
+        if (!strcmp(m->id, G.copy_id)) {
+            Buf plain, latin; int ok;
+            buf_init(&plain); buf_init(&latin);
+            md_to_plain(&plain, m->text ? m->text : "");
+            utf8_to_latin1(&latin, buf_str(&plain), 1);
+            ok = clipboard_write(buf_str(&latin));
+            set_status(ok ? "Message copied" : "Could not write to clipboard");
+            buf_free(&plain); buf_free(&latin); return;
+        }
+    }
+    set_status("Click a message to select it first");
+}
+
+static void composer_clipboard(const char *command)
+{
+    G.copy_chat = 0; mark_dirty(DIRTY_CHAT);
+    DoGadgetMethod((struct Gadget *)G.g[G_INPUT], G.win, NULL, GM_TEXTEDITOR_ARexxCmd, NULL, command);
+    editor_wake();
+    ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
+}
+
 static void apply_theme(int idx);
+static void handle_preferences(void);
+#include "ui_panels.inc"
+
+static void launch_preferences_for_server(int slot)
+{
+    char path[512]; BPTR lock, dir = GetProgramDir(); Buf cmd;
+    if (!dir || !NameFromLock(dir, path, sizeof(path)) || !AddPart(path, "AmiRocketPrefs", sizeof(path))) {
+        request("Preferences", "Could not locate the program directory."); return;
+    }
+    lock = Lock(path, ACCESS_READ);
+    if (!lock) { request("Preferences", "Place AmiRocketPrefs beside the AmiRocket executable."); return; }
+    UnLock(lock); buf_init(&cmd);
+    if(!shell_argument(&cmd,path)) { buf_free(&cmd); return; }
+    if(slot>=0) buf_printf(&cmd," EDIT=%d",slot+1);
+    if (cmd.oom || launch_helper(buf_str(&cmd)) < 0)
+        request("Preferences", "Could not start AmiRocketPrefs.");
+    buf_free(&cmd);
+}
+
+static void launch_preferences(void) { launch_preferences_for_server(-1); }
+#include "server_popup.inc"
+
+static int preference_display_changed(const Prefs *p)
+{
+    return p->show_emoji != G.prefs.show_emoji || p->show_avatars != G.prefs.show_avatars ||
+        p->inline_images != G.prefs.inline_images || p->ownscreen != G.prefs.ownscreen ||
+        p->chat_font_size != G.prefs.chat_font_size || strcmp(p->theme, G.prefs.theme) || strcmp(p->chat_font, G.prefs.chat_font);
+}
+static void apply_preferences(const Prefs *next, int permanent)
+{
+    int display; NetMsg *m;
+    if(next->extra_count<0 || next->extra_count>PREFS_EXTRA_MAX) return;
+    display=preference_display_changed(next);
+    if (next->interval != G.prefs.interval) {
+        m = netmsg_new(NC_SET_INTERVAL); if (m) { m->a_interval = next->interval; send_cmd(m); }
+    }
+    G.prefs.interval = next->interval; G.prefs.show_emoji = next->show_emoji; G.prefs.show_avatars = next->show_avatars;
+    G.prefs.inline_images = next->inline_images; G.prefs.ownscreen = next->ownscreen; G.prefs.open_links = next->open_links;
+    G.prefs.preview_images = next->preview_images; G.prefs.chat_font_size = next->chat_font_size;
+    ar_strlcpy(G.prefs.theme,next->theme,sizeof(G.prefs.theme)); ar_strlcpy(G.prefs.chat_font,next->chat_font,sizeof(G.prefs.chat_font));
+    ar_strlcpy(G.prefs.browser,next->browser,sizeof(G.prefs.browser)); ar_strlcpy(G.prefs.image_viewer,next->image_viewer,sizeof(G.prefs.image_viewer));
+    G.prefs.extra_count = next->extra_count; memcpy(G.prefs.extra,next->extra,sizeof(G.prefs.extra));
+    if(G.multi) server_reconfigure(next);
+    G.settings_override=!permanent; G.server_overrides=0;
+    G.session_override = !permanent; G.plugins_dirty = 1;
+    if (!G.prefs.show_avatars) avatar_reset();
+    if (!G.prefs.inline_images) images_reset();
+    if(display && (G.panel_depth || G.iconified)) G.defer_display=1;
+    else if (display) { load_chat_font(); apply_theme(theme_find(G.prefs.theme)); }
+    prefs_service_publish(G.prefs_service,&G.prefs);
+    application_event("CONFIG",G.cur_rid,"",permanent ? "saved" : "session");
+}
+static void handle_preferences(void)
+{
+    PrefsUpdate *m;
+    while ((m = prefs_service_next(G.prefs_service))) {
+        if(m->server_only>0 && m->server_only<=PREFS_SERVERS_MAX) {
+            int slot=m->server_only-1; Prefs *next=ar_malloc(sizeof(Prefs));
+            if(next) {
+                *next=G.prefs; next->servers[slot]=m->prefs.servers[slot]; next->servers_defined=1;
+                server_reconfigure(next); ar_free(next);
+                if(m->permanent) G.server_overrides&=~(1<<slot); else G.server_overrides|=1<<slot;
+                G.session_override=G.settings_override || G.server_overrides;
+                prefs_service_publish(G.prefs_service,&G.prefs);
+            }
+        } else apply_preferences(&m->prefs,m->permanent);
+        prefs_update_free(m);
+    }
+}
+static void reload_preferences(void)
+{
+    Prefs *next;
+    if (!G.running_client || G.session_override) return;
+    next = ar_malloc(sizeof(*next)); if (!next) return;
+    if (!prefs_load(next) && (preference_display_changed(next) || next->interval!=G.prefs.interval || next->open_links!=G.prefs.open_links ||
+        next->preview_images!=G.prefs.preview_images || strcmp(next->browser,G.prefs.browser) || strcmp(next->image_viewer,G.prefs.image_viewer) ||
+        memcmp(next->servers,G.prefs.servers,sizeof(next->servers)) || next->servers_defined!=G.prefs.servers_defined ||
+        next->extra_count!=G.prefs.extra_count || memcmp(next->extra,G.prefs.extra,sizeof(next->extra)))) apply_preferences(next,1);
+    memset(next,0,sizeof(*next)); ar_free(next);
+}
+
+#include "control.inc"
 
 static void handle_menu(UWORD code)
 {
-    int theme = -1, force_reopen = 0;
 
     while (code != MENUNULL) {
         struct MenuItem *item = ItemAddress(G.menu, code);
         if (!item)
             break;
         switch ((ULONG)GTMENUITEM_USERDATA(item)) {
-        case M_CONNECT:    login_open(NULL); break;
-        case M_DISCONNECT: if (G.connected) cmd_simple(NC_DISCONNECT); break;
+        case M_ICONIFY: if(!main_iconify()) request("Iconify","Could not create the Workbench icon."); break;
+        case M_CONNECT:    if(G.multi && G.prefs.server[0]) server_connect(G.active_server,1); else login_open(NULL); break;
+        case M_DISCONNECT: if(G.multi) server_disconnect(G.active_server); else if(G.connected) cmd_simple(NC_DISCONNECT); break;
         case M_LOGOUT:
             forget_login();
             if (G.connected)
                 cmd_simple(NC_LOGOUT);
             break;
+        case M_COMPLETE: if (G.n_sugg) complete_suggestion(G.sugg_sel); break;
+        case M_NEXTSUGG: if (G.n_sugg) { G.sugg_sel = (G.sugg_sel + 1) % G.n_sugg; mark_dirty(DIRTY_CHAT); } break;
+        case M_PREVSUGG: if (G.n_sugg) { G.sugg_sel = (G.sugg_sel + G.n_sugg - 1) % G.n_sugg; mark_dirty(DIRTY_CHAT); } break;
+        case M_NEXTUNREAD: next_unread(); break;
+        case M_JUMPUNREAD: jump_unread(); break;
+        case M_OLDER: load_older(); break;
+        case M_SEND: cmd_send_input(); break;
+        case M_PREFS: launch_preferences(); break;
+        case M_NEWDM: new_conversation(0); break;
+        case M_NEWCHANNEL: new_conversation(1); break;
+        case M_NEWPRIVATE: new_conversation(2); break;
+        case M_CLEARIMAGES: images_reset(); msgs_rebuild(0); set_status("Image preview cache cleared"); break;
+        case M_SAVEFILE: {
+            int i;
+            for (i = 0; i < G.msgs.count; i++) if (!strcmp(G.copy_rid, G.cur_rid) && !strcmp(G.copy_id, G.msgs.items[i].id)) break;
+            if (i < G.msgs.count && G.msgs.items[i].file_count) download_attachment(i, G.copy_file >= 0 && G.copy_file < G.msgs.items[i].file_count ? G.copy_file : 0);
+            else set_status("Select a message with an attachment first");
+            break;
+        }
+        case M_COPY: if (G.copy_chat) copy_message(); else composer_clipboard("COPY"); break;
+        case M_CUT: composer_clipboard("CUT"); break;
+        case M_PASTE: composer_clipboard("PASTE"); break;
+        case M_COPYMSG: copy_message(); break;
         case M_ABOUT:      about(); break;
         case M_QUIT:       G.quit = 1; break;
         case M_REFRESH:    if (G.connected) cmd_simple(NC_POLL_NOW); break;
-        case M_OWNSCREEN:
-            G.prefs.ownscreen = (item->Flags & CHECKED) != 0;
-            theme = theme_find(G.prefs.theme);
-            force_reopen = 1;
-            break;
         default:
-            if ((ULONG)GTMENUITEM_USERDATA(item) >= M_THEME_BASE)
-                theme = (int)((ULONG)GTMENUITEM_USERDATA(item) - M_THEME_BASE);
+            if ((ULONG)GTMENUITEM_USERDATA(item) >= M_PLUGIN_BASE) plugins_action((ULONG)GTMENUITEM_USERDATA(item)-M_PLUGIN_BASE);
             break;
         }
         code = item->NextSelect;
     }
-    /* after the loop: switching themes frees the menu strip */
-    if (theme >= 0 && (force_reopen || theme != theme_find(G.prefs.theme)))
-        apply_theme(theme);
 }
 
 static void handle_main(void)
@@ -1548,17 +2600,32 @@ static void handle_main(void)
 
     while ((result = RA_HandleInput(G.win_obj, &code)) != WMHI_LASTMSG) {
         switch (result & WMHI_CLASSMASK) {
+        case WMHI_ICONIFY:
+            if(!main_iconify()) request("Iconify","Could not create the Workbench icon.");
+            break;
+        case WMHI_UNICONIFY:
+            if(!main_restore()) set_status("Cannot restore window; double-click the icon to retry");
+            break;
         case WMHI_CLOSEWINDOW:
             G.quit = 1;
             break;
         case WMHI_MENUPICK:
             handle_menu(code);
             break;
+        case WMHI_ACTIVE: reload_preferences(); break;
         case WMHI_NEWSIZE:
             G.chat_relayout = 1;
             mark_dirty(DIRTY_SIDE | DIRTY_CHAT | DIRTY_HEADER);
             break;
         case WMHI_RAWKEY:
+#ifdef AR_GUI_QA
+            if((result&WMHI_KEYMASK)==0x58) { G.quit=1; break; } /* F9 ends an isolated visual fixture. */
+#endif
+            if((result&WMHI_KEYMASK)==0x59 && G.multi && G.server_view) {
+                struct IBox box;
+                if(area_box(G.g[G_ROOMS],&box)) { G.side_menu_slot=G.active_server; G.side_menu_x=G.win->LeftEdge+box.Left+20; G.side_menu_y=G.win->TopEdge+box.Top+10; G.side_menu_pending=1; }
+                break;
+            }
             /* NewMouse wheel codes, for mouse drivers without V47 wheel events */
             if ((result & WMHI_KEYMASK) == 0x7A)
                 scroll_chat(G.chat.top - 3);
@@ -1567,12 +2634,6 @@ static void handle_main(void)
             break;
         case WMHI_GADGETUP:
             switch (result & WMHI_GADGETMASK) {
-            case G_ROOMS:
-                if (G.click_seen[G_ROOMS])
-                    G.click_seen[G_ROOMS] = 0;
-                else
-                    on_side_click();
-                break;
             case G_SIDESCROLL: {
                 ULONG top = 0;
                 GetAttr(SCROLLER_Top, G.g[G_SIDESCROLL], &top);
@@ -1585,18 +2646,18 @@ static void handle_main(void)
                 scroll_chat((int)top);
                 break;
             }
-            case G_INPUT:
-                if (G.n_sugg)
-                    complete_suggestion(G.sugg_sel);   /* Return/Tab (any key code): take the selection */
-                else if (code != 9 && code != 0x5F)   /* not Tab / Help */
-                    cmd_send_input();
-                break;
-            case G_MSGS:
-                if (G.click_seen[G_MSGS])
-                    G.click_seen[G_MSGS] = 0;
-                else
-                    on_chat_click();
-                break;
+            case G_CONNECTB: if(G.multi && G.prefs.server[0]) server_connect(G.active_server,1); else login_open(NULL); break;
+            case G_NEW: new_conversation(0); break;
+            case G_PREFSB: launch_preferences(); break;
+            case G_EMOJI: toolbar_format(":", "", ""); break;
+            case G_BOLD: toolbar_format("*", "*", "text"); break;
+            case G_ITALIC: toolbar_format("_", "_", "text"); break;
+            case G_STRIKE: toolbar_format("~", "~", "text"); break;
+            case G_INLINECODE: toolbar_format("`", "`", "code"); break;
+            case G_CODEBLOCK: toolbar_format("```\n", "\n```", "code"); break;
+            case G_LINK: toolbar_format("[", "](https://)", "label"); break;
+            case G_INPUT: editor_wake(); break;
+            case G_FILTER: G.filter_changed = 1; break;
             case G_SEND:
                 cmd_send_input();
                 break;
@@ -1604,6 +2665,8 @@ static void handle_main(void)
             break;
         }
     }
+    sync_conversation_focus();
+    if(G.side_menu_pending) server_context_popup();
 }
 
 static void handle_login(void)
@@ -1645,10 +2708,14 @@ static int open_libs(void)
         { (struct Library **)&IntuitionBase, "intuition.library", 39 },
         { (struct Library **)&GfxBase, "graphics.library", 39 },
         { &GadToolsBase, "gadtools.library", 39 },
+        { &IconBase, "icon.library", 39 },
         { &UtilityBase, "utility.library", 39 },
         { &WindowBase, "window.class", 44 },
         { &LayoutBase, "gadgets/layout.gadget", 44 },
         { &ButtonBase, "gadgets/button.gadget", 44 },
+        { &AslBase, "asl.library", 39 },
+        { &DiskfontBase, "diskfont.library", 39 },
+        { &TextFieldBase, "gadgets/texteditor.gadget", 47 },
         { &StringBase, "gadgets/string.gadget", 44 },
         { &ListBrowserBase, "gadgets/listbrowser.gadget", 44 },
         { &CheckBoxBase, "gadgets/checkbox.gadget", 44 },
@@ -1676,14 +2743,20 @@ static int open_libs(void)
         }
     }
     LocaleBase = (struct LocaleBase *)OpenLibrary((CONST_STRPTR)"locale.library", 38);
+    DataTypesBase = OpenLibrary((CONST_STRPTR)"datatypes.library", 44);
+    G.editor_class = MakeClass(NULL, NULL, TEXTEDITOR_GetClass(), 0, 0);
+    if (!G.editor_class) return -1;
+    G.editor_class->cl_Dispatcher.h_Entry = (HOOKFUNC)HookEntry;
+    G.editor_class->cl_Dispatcher.h_SubEntry = (HOOKFUNC)editor_dispatch;
     return 0;
 }
 
 static void close_libs(void)
 {
+    if (G.editor_class) { FreeClass(G.editor_class); G.editor_class = NULL; }
     struct Library **all[] = {
-        &ScrollerBase, &SpaceBase, &LabelBase, &CheckBoxBase, &ListBrowserBase, &StringBase, &ButtonBase, &LayoutBase,
-        &WindowBase, &UtilityBase, &GadToolsBase, (struct Library **)&GfxBase,
+        &DataTypesBase, &TextFieldBase, &DiskfontBase, &AslBase, &ScrollerBase, &SpaceBase, &LabelBase, &CheckBoxBase, &ListBrowserBase, &StringBase, &ButtonBase, &LayoutBase,
+        &IconBase, &WindowBase, &UtilityBase, &GadToolsBase, (struct Library **)&GfxBase,
         (struct Library **)&LocaleBase, (struct Library **)&IntuitionBase, NULL
     };
     int i;
@@ -1755,28 +2828,33 @@ static void close_screen(void)
 
 static void build_menu(void)
 {
-    int n = theme_count(), cur = theme_find(G.prefs.theme), i, k;
-    LONG all = (1L << n) - 1;
-
-    G.newmenu = (struct NewMenu *)ar_calloc((size_t)(BASE_MENU_ITEMS + n + 1), sizeof(struct NewMenu));
-    if (!G.newmenu)
-        return;
-    memcpy(G.newmenu, g_newmenu, sizeof(struct NewMenu) * (size_t)BASE_MENU_ITEMS);
-    for (i = 0; i < BASE_MENU_ITEMS; i++)
-        if ((ULONG)G.newmenu[i].nm_UserData == M_OWNSCREEN && G.prefs.ownscreen)
-            G.newmenu[i].nm_Flags |= CHECKED;
-    for (i = 0, k = BASE_MENU_ITEMS; i < n; i++, k++) {
-        const Theme *t = theme_get(i);
-        G.newmenu[k].nm_Type = NM_SUB;
-        G.newmenu[k].nm_Label = (STRPTR)t->name;
-        G.newmenu[k].nm_Flags = CHECKIT | (i == cur ? CHECKED : 0);
-        G.newmenu[k].nm_MutualExclude = all & ~(1L << i);
-        G.newmenu[k].nm_UserData = (APTR)(ULONG)(M_THEME_BASE + i);
+    int n=plugins_count(),i,k=BASE_MENU_ITEMS;
+    G.newmenu = ar_calloc(BASE_MENU_ITEMS+n+2,sizeof(struct NewMenu));
+    if(!G.newmenu) return;
+    memcpy(G.newmenu,g_newmenu,sizeof(g_newmenu));
+    if(n) {
+        G.newmenu[k].nm_Type=NM_TITLE; G.newmenu[k++].nm_Label=(STRPTR)"Plugins";
+        for(i=0;i<n;i++,k++) { G.newmenu[k].nm_Type=NM_ITEM; G.newmenu[k].nm_Label=(STRPTR)plugins_label(i); G.newmenu[k].nm_UserData=(APTR)(ULONG)(M_PLUGIN_BASE+i); }
     }
-    G.newmenu[k].nm_Type = NM_END;
-    G.menu = CreateMenus(G.newmenu, GTMN_FrontPen, 0, TAG_END);
-    if (G.menu && G.vi)
-        LayoutMenus(G.menu, G.vi, GTMN_NewLookMenus, TRUE, TAG_END);
+    G.newmenu[k].nm_Type=NM_END;
+    G.menu=CreateMenus(G.newmenu,GTMN_FrontPen,0,TAG_END);
+    if(G.menu && G.vi) LayoutMenus(G.menu,G.vi,GTMN_NewLookMenus,TRUE,TAG_END);
+}
+static void refresh_plugins(void)
+{
+    if(!G.plugins_dirty && !(G.menu_rebuild && G.win_obj)) return;
+    G.plugins_dirty=0;
+    if(plugins_sync(&G.prefs)) G.menu_rebuild=1;
+    if(G.menu_rebuild && G.win_obj) {
+        if(G.win) ClearMenuStrip(G.win);
+        SetAttrs(G.win_obj,WINDOW_MenuStrip,0,TAG_END);
+        if(G.menu) FreeMenus(G.menu);
+        ar_free(G.newmenu); G.menu=NULL; G.newmenu=NULL;
+        build_menu(); SetAttrs(G.win_obj,WINDOW_MenuStrip,(ULONG)G.menu,TAG_END);
+        G.menu_rebuild=0;
+    }
+    publish_plugins();
+    if(plugins_error()[0]) set_status(plugins_error());
 }
 
 /* Theme colours as pens on the screen in use: exact on the theme's own
@@ -1793,10 +2871,59 @@ static LONG pen_rgb(ULONG rgb)
 
 static void alloc_emoji_pens(void)
 {
+    G.pens.presence[0] = pen_rgb(0x20B887);
+    G.pens.presence[1] = pen_rgb(0xD9A529);
+    G.pens.presence[2] = pen_rgb(0xDE5454);
     int i;
     G.pens.emoji[0] = G.pens.bg;
     for (i = 1; i < EMOJI_COLOURS; i++)
         G.pens.emoji[i] = pen_rgb(emoji_palette[i]);
+}
+
+/* Guard custom drawing against foreground/background collisions in the
+ * actual screen palette, including reduced-colour Workbenches. */
+static LONG pen_lightness(LONG pen)
+{
+    ULONG rgb[3];
+    GetRGB32(G.scr->ViewPort.ColorMap, (ULONG)pen, 1, rgb);
+    return (30 * (LONG)(rgb[0] >> 24) + 59 * (LONG)(rgb[1] >> 24) +
+            11 * (LONG)(rgb[2] >> 24)) / 100;
+}
+
+static LONG readable_pen(LONG bg, LONG preferred)
+{
+    LONG light = pen_lightness(bg), best = preferred;
+    LONG distance = labs(pen_lightness(preferred) - light);
+    struct DrawInfo *dri;
+    int i;
+    if (distance >= 64)
+        return preferred;
+    dri = GetScreenDrawInfo(G.scr);
+    if (!dri)
+        return preferred;
+    for (i = 0; i < dri->dri_NumPens; i++) {
+        LONG d = labs(pen_lightness(dri->dri_Pens[i]) - light);
+        if (d > distance) {
+            best = dri->dri_Pens[i];
+            distance = d;
+        }
+    }
+    FreeScreenDrawInfo(G.scr, dri);
+    return best;
+}
+
+static void readable_view_pens(ViewPens *p)
+{
+    p->text = readable_pen(p->bg, p->text);
+    p->dim = readable_pen(p->bg, p->dim);
+    p->highlight = readable_pen(p->bg, p->highlight);
+    p->accent_text = readable_pen(p->accent, p->accent_text);
+    p->side_text = readable_pen(p->side_bg, p->side_text);
+    p->side_dim = readable_pen(p->side_bg, p->side_dim);
+    p->side_sel_text = readable_pen(p->side_sel, p->side_text);
+    p->side_sel_dim = readable_pen(p->side_sel, p->side_dim);
+    p->pill_text = readable_pen(p->pill_bg, p->text);
+    { int i; for (i = 0; i < 6; i++) p->avatar_text[i] = readable_pen(p->avatar[i], p->text); }
 }
 
 static void alloc_pens(void)
@@ -1828,6 +2955,7 @@ static void alloc_pens(void)
         p->avatar[3] = pen_rgb(0xD49A3A);
         p->avatar[4] = pen_rgb(0x8A5AC4);
         p->avatar[5] = pen_rgb(0x3AA6A6);
+        readable_view_pens(p);
         alloc_emoji_pens();
         return;
     }
@@ -1839,7 +2967,7 @@ static void alloc_pens(void)
     p->highlight = pen_rgb(t->rgb[TC_HIGHLIGHT]);
     p->side_bg = pen_rgb(t->rgb[TC_BARBLOCK]);
     p->side_sel = pen_rgb(t->rgb[TC_EXTRA1]);
-    p->side_text = p->text;
+    p->side_text = pen_rgb(t->rgb[TC_BARDETAIL]);
     p->side_dim = p->dim;
     p->sep = p->side_sel;
     p->pill_bg = p->side_sel;
@@ -1849,6 +2977,7 @@ static void alloc_pens(void)
     p->avatar[3] = pen_rgb(t->rgb[TC_EXTRA4]);
     p->avatar[4] = pen_rgb(t->rgb[TC_EXTRA5]);
     p->avatar[5] = pen_rgb(t->rgb[TC_EXTRA6]);
+    readable_view_pens(p);
     alloc_emoji_pens();
 }
 
@@ -1862,6 +2991,10 @@ static void free_pens(void)
     G.n_obtained = 0;
 }
 
+static int sidebar_weight(void)
+{
+    int n=atoi(prefs_extra(&G.prefs,"workspace.sidebar","30")); return n<15?15:n>65?65:n;
+}
 static int open_main(void)
 {
     Object *root;
@@ -1886,24 +3019,45 @@ static int open_main(void)
     G.render_hook.h_SubEntry = (HOOKFUNC)render_hook_func;
     G.idcmp_hook.h_Entry = (HOOKFUNC)HookEntry;
     G.idcmp_hook.h_SubEntry = (HOOKFUNC)idcmp_hook_func;
-    G.edit_hook.h_Entry = (HOOKFUNC)HookEntry;
-    G.edit_hook.h_SubEntry = (HOOKFUNC)edit_hook_func;
+    G.filter_hook.h_Entry = (HOOKFUNC)HookEntry;
+    G.filter_hook.h_SubEntry = (HOOKFUNC)filter_hook_func;
+    memset(&G.editor_listener, 0, sizeof(G.editor_listener));
+    G.editor_listener.onCharEntered = editor_char;
+    G.editor_listener.onCharsInserted = editor_change;
+    G.editor_listener.onCharsDeleted = editor_change;
 
+    G.g[G_STATUS]=G.g[G_COMPOSELABEL]=NULL;
     root = G.g[0] = VLayoutObject,
         LAYOUT_SpaceOuter, FALSE,
         LAYOUT_InnerSpacing, 0,
         LAYOUT_DeferLayout, TRUE,
         LAYOUT_AddChild, HLayoutObject,
             LAYOUT_InnerSpacing, 0,
+            LAYOUT_AddChild, VLayoutObject,
+                LAYOUT_SpaceOuter, FALSE,
+                LAYOUT_AddChild,panel_button(G_NEW,"Create New"), CHILD_WeightedHeight,0,
+                LAYOUT_AddChild, ButtonObject,
+                    GA_ReadOnly, TRUE, GA_Text, (ULONG)"Find rooms / people",
+                    BUTTON_Justification, BCJ_LEFT,
+                End,
+                CHILD_WeightedHeight, 0,
+                LAYOUT_AddChild, G.g[G_FILTER] = StringObject,
+                    GA_ID, G_FILTER, GA_RelVerify, TRUE,
+                    STRINGA_MaxChars, sizeof(G.filter) - 1,
+                    STRINGA_TextVal, (ULONG)G.filter,
+                    STRINGA_EditHook, (ULONG)&G.filter_hook,
+                End,
+                CHILD_WeightedHeight, 0,
+                LAYOUT_AddChild, HLayoutObject,
             LAYOUT_AddChild, G.g[G_ROOMS] = SpaceObject,
                 GA_ID, G_ROOMS,
+                GA_ReadOnly, TRUE,
+                GA_Immediate, TRUE,
                 GA_RelVerify, TRUE,
                 ICA_TARGET, ICTARGET_IDCMP,
                 SPACE_Transparent, TRUE,
                 SPACE_RenderHook, (ULONG)&G.render_hook,
             End,
-            CHILD_WeightedWidth, 28,
-            CHILD_MinWidth, minside,
             LAYOUT_AddChild, G.g[G_SIDESCROLL] = ScrollerObject,
                 GA_ID, G_SIDESCROLL,
                 GA_RelVerify, TRUE,
@@ -1912,6 +3066,11 @@ static int open_main(void)
                 ICA_TARGET, ICTARGET_IDCMP,
             End,
             CHILD_WeightedWidth, 0,
+                End,
+            End,
+            CHILD_WeightedWidth, sidebar_weight(),
+            CHILD_WeightBar, TRUE,
+            CHILD_MinWidth, minside,
             LAYOUT_AddChild, VLayoutObject,
                 LAYOUT_InnerSpacing, 0,
                 LAYOUT_AddChild, G.g[G_ROOMHDR] = SpaceObject,
@@ -1925,6 +3084,8 @@ static int open_main(void)
                     LAYOUT_InnerSpacing, 0,
                     LAYOUT_AddChild, G.g[G_MSGS] = SpaceObject,
                         GA_ID, G_MSGS,
+                        GA_ReadOnly, TRUE,
+                        GA_Immediate, TRUE,
                         GA_RelVerify, TRUE,
                         ICA_TARGET, ICTARGET_IDCMP,
                         SPACE_Transparent, TRUE,
@@ -1939,36 +3100,55 @@ static int open_main(void)
                     End,
                     CHILD_WeightedWidth, 0,
                 End,
-                LAYOUT_AddChild, HLayoutObject,
-                    LAYOUT_SpaceOuter, TRUE,
-                    LAYOUT_AddChild, G.g[G_INPUT] = StringObject,
-                        GA_ID, G_INPUT,
-                        GA_RelVerify, TRUE,
-                        STRINGA_MaxChars, INPUT_MAX,
-                        STRINGA_EditHook, (ULONG)&G.edit_hook,   /* every keystroke: suggestions */
+                LAYOUT_AddChild, VLayoutObject,
+                    LAYOUT_SpaceOuter, FALSE,
+                    LAYOUT_InnerSpacing, 0,
+                    LAYOUT_VertSpacing, 0,
+                    LAYOUT_EvenSize, FALSE,
+                    LAYOUT_AddChild, HLayoutObject,
+                    LAYOUT_InnerSpacing, 0,
+                    LAYOUT_AddChild, G.g[G_INPUT] = NewObject(G.editor_class, NULL,
+                        GA_ID, G_INPUT, GA_RelVerify, TRUE, GA_TabCycle, TRUE,
+                        GA_TEXTEDITOR_FixedFont, FALSE,
+                        GA_TEXTEDITOR_ExportWrap, 0,
+                        GA_TEXTEDITOR_LineEndingExport, LINEENDING_LF,
+                        GA_TEXTEDITOR_Contents, (ULONG)(G.reopen_draft ? G.reopen_draft : (STRPTR)G.hook_buf),
+                        ICA_TARGET, ICTARGET_IDCMP,
+                        TAG_END),
+                    CHILD_MinHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
+                    CHILD_MaxHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
                     End,
-                    LAYOUT_AddChild, G.g[G_SEND] = ButtonObject,
-                        GA_ID, G_SEND,
-                        GA_RelVerify, TRUE,
-                        GA_Text, (ULONG)"_Send",
-                    End,
-                    CHILD_WeightedWidth, 0,
+                    CHILD_MinHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
+                    CHILD_MaxHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
+                    CHILD_WeightedHeight, 0,
+                    LAYOUT_AddChild, HLayoutObject, LAYOUT_InnerSpacing, 1,
+                        LAYOUT_AddChild, panel_button(G_EMOJI, ":)"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, panel_button(G_BOLD, "B"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, panel_button(G_ITALIC, "I"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, panel_button(G_STRIKE, "S"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, panel_button(G_INLINECODE, "<>"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, panel_button(G_CODEBLOCK, "Code"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, panel_button(G_LINK, "Link"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, SpaceObject, End,
+                        LAYOUT_AddChild, G.g[G_SEND] = panel_button(G_SEND, "_Send"), CHILD_WeightedWidth, 0,
+                    End, CHILD_WeightedHeight, 0,
                 End,
                 CHILD_WeightedHeight, 0,
             End,
-            CHILD_WeightedWidth, 72,
+            CHILD_WeightedWidth, 100-sidebar_weight(),
         End,
-        LAYOUT_AddChild, G.g[G_STATUS] = ButtonObject,
-            GA_ID, G_STATUS,
-            GA_ReadOnly, TRUE,
-            GA_Text, (ULONG)G.status,
-            BUTTON_Justification, BCJ_LEFT,
-        End,
-        CHILD_WeightedHeight, 0,
     End;
     if (!root)
         return -1;
+    G.app_port=CreateMsgPort();
+    if(!G.app_port) { DisposeObject(root); return -1; }
+    G.app_icon=GetDiskObject("PROGDIR:AmiRocket");
+    if(!G.app_icon) G.app_icon=GetDefDiskObject(WBTOOL);
     G.win_obj = WindowObject,
+        WINDOW_AppPort, (ULONG)G.app_port,
+        WINDOW_IconifyGadget, TRUE,
+        WINDOW_IconTitle, (ULONG)"AmiRocket",
+        G.app_icon ? WINDOW_Icon : TAG_IGNORE, (ULONG)G.app_icon,
         WA_Title, (ULONG)G.title,
         WA_ScreenTitle, (ULONG)"AmiRocket " AR_VERSION,
         WA_PubScreen, (ULONG)G.scr,
@@ -1976,25 +3156,32 @@ static int open_main(void)
         WA_CloseGadget, TRUE,
         WA_DepthGadget, TRUE,
         WA_SizeGadget, TRUE,
-        WA_Activate, TRUE,
+        WA_Activate, TRUE, WA_ReportMouse,TRUE,
         WA_Width, G.prefs.win_width,
         WA_Height, G.prefs.win_height,
         G.prefs.win_left >= 0 ? WA_Left : TAG_IGNORE, G.prefs.win_left,
         G.prefs.win_top >= 0 ? WA_Top : TAG_IGNORE, G.prefs.win_top,
         G.prefs.win_left < 0 ? WINDOW_Position : TAG_IGNORE, WPOS_CENTERSCREEN,
         G.menu ? WINDOW_MenuStrip : TAG_IGNORE, (ULONG)G.menu,
-        WA_IDCMP, IDCMP_GADGETDOWN | IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_MENUPICK |
+        WA_IDCMP, IDCMP_MOUSEBUTTONS | IDCMP_GADGETDOWN | IDCMP_GADGETUP | IDCMP_CLOSEWINDOW | IDCMP_MENUPICK |
                   IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW | IDCMP_RAWKEY | IDCMP_VANILLAKEY |
-                  IDCMP_IDCMPUPDATE | IDCMP_EXTENDEDMOUSE | IDCMP_ACTIVEWINDOW | IDCMP_INACTIVEWINDOW,
+                  IDCMP_MOUSEMOVE | IDCMP_IDCMPUPDATE | IDCMP_EXTENDEDMOUSE | IDCMP_ACTIVEWINDOW | IDCMP_INACTIVEWINDOW,
         WINDOW_IDCMPHook, (ULONG)&G.idcmp_hook,
-        WINDOW_IDCMPHookBits, IDCMP_IDCMPUPDATE | IDCMP_EXTENDEDMOUSE,
+        WINDOW_IDCMPHookBits, IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS | IDCMP_GADGETDOWN | IDCMP_IDCMPUPDATE | IDCMP_EXTENDEDMOUSE,
         WINDOW_ParentGroup, (ULONG)root,
     End;
     if (!G.win_obj) {
         DisposeObject(root);
+        if(G.app_icon) FreeDiskObject(G.app_icon);
+        G.app_icon=NULL;
+        DeleteMsgPort(G.app_port); G.app_port=NULL;
         return -1;
     }
     G.win = RA_OpenWindow(G.win_obj);
+    if (G.win) {
+        DoMethod(G.g[G_INPUT], GM_TEXTEDITOR_AddChangeListener, &G.editor_listener);
+        if (G.reopen_draft) { FreeVec(G.reopen_draft); G.reopen_draft = NULL; }
+    }
     return G.win ? 0 : -1;
 }
 
@@ -2002,18 +3189,56 @@ static void remember_window(void)
 {
     if (!G.win)
         return;
+    { struct IBox box; char value[16];
+      if(area_box(G.g[G_ROOMS],&box) && G.win->Width>0) {
+          snprintf(value,sizeof(value),"%d",(box.Width+18)*100/G.win->Width); prefs_set(&G.prefs,"workspace.sidebar",value);
+      }
+    }
     G.prefs.win_left = G.win->LeftEdge;
     G.prefs.win_top = G.win->TopEdge;
     G.prefs.win_width = G.win->Width;
     G.prefs.win_height = G.win->Height;
 }
 
+/* window.class keeps the gadget tree alive while its Intuition window is closed. */
+static int main_iconify(void)
+{
+    if(G.iconified) return 1;
+    if(!G.win_obj || !G.win || G.panel_depth || G.lwin_obj) return 0;
+    composer_capture(); remember_anchor(); remember_window();
+    if(!RA_Iconify(G.win_obj)) return 0;
+    G.win=NULL; G.iconified=1; G.side_menu_pending=0;
+    sync_conversation_focus();
+    if(G.own_screen) ScreenToBack(G.scr);
+    application_event("WINDOW",G.cur_rid,"","iconified");
+    return 1;
+}
+static int main_restore(void)
+{
+    if(!G.iconified) return G.win!=NULL;
+    G.win=RA_OpenWindow(G.win_obj);
+    if(!G.win) return 0;
+    G.iconified=0;
+    if(G.scr) ScreenToFront(G.scr);
+    WindowToFront(G.win); ActivateWindow(G.win);
+    G.chat_relayout=1; update_title(); set_busy(G.busy);
+    refresh_plugins(); mark_dirty(DIRTY_SIDE|DIRTY_CHAT|DIRTY_HEADER); redraw_dirty();
+    sync_conversation_focus();
+    application_event("WINDOW",G.cur_rid,"","restored");
+    return 1;
+}
+
 static void close_main(void)
 {
+    images_drop_pictures();
+    avatar_drop_pictures();
     if (G.win_obj)
         DisposeObject(G.win_obj);
     G.win_obj = NULL;
-    G.win = NULL;
+    G.win = NULL; G.iconified=0;
+    if(G.app_icon) FreeDiskObject(G.app_icon);
+    G.app_icon=NULL;
+    if(G.app_port) { struct Message *m; while((m=GetMsg(G.app_port))) ReplyMsg(m); DeleteMsgPort(G.app_port); G.app_port=NULL; }
     if (G.menu)
         FreeMenus(G.menu);
     G.menu = NULL;
@@ -2030,10 +3255,14 @@ static void close_main(void)
 static void apply_theme(int idx)
 {
     int had_login = G.lwin_obj != NULL;
+    if (G.win) {
+        G.reopen_draft = (STRPTR)DoGadgetMethod((struct Gadget *)G.g[G_INPUT], G.win, NULL, GM_TEXTEDITOR_ExportText, NULL);
+        if (!G.reopen_draft) { request("AmiRocket", "Not enough memory to preserve the draft; theme unchanged."); return; }
+    }
+    composer_capture();
 
     ar_strlcpy(G.prefs.theme, theme_get(idx)->id, sizeof(G.prefs.theme));
     remember_window();
-    prefs_save(&G.prefs);
     login_close();
     close_main();
     if (open_main() < 0) {
@@ -2075,6 +3304,8 @@ int gui_run(void)
         return RETURN_FAIL;
     }
     prefs_load(&G.prefs);
+    servers_init();
+    load_chat_font();
     update_tz(0);
     G.port = CreateMsgPort();
     if (!G.port || worker_start(G.port, err, sizeof(err)) < 0) {
@@ -2082,6 +3313,10 @@ int gui_run(void)
         rc = RETURN_FAIL;
         goto out;
     }
+    G.running_client = 1;
+    G.prefs_service = prefs_service_start(&G.prefs);
+    plugins_start_host();
+    arexx_start(control_command);
     if (G.prefs.interval != 5) {
         NetMsg *m = netmsg_new(NC_SET_INTERVAL);
         if (m) {
@@ -2095,10 +3330,13 @@ int gui_run(void)
         goto out;
     }
 
-    if (G.prefs.remember && G.prefs.token[0] && G.prefs.user_id[0] && G.prefs.server[0])
-        cmd_connect_token();
-    else
-        login_open(NULL);
+    G.focus_slot=-1; sync_conversation_focus();
+    { int i,defined=0;
+      for(i=0;i<PREFS_SERVERS_MAX;i++) if(G.prefs.servers[i].url[0]) {
+          defined++; if(G.prefs.servers[i].autoconnect) server_connect(i,i==G.active_server);
+      }
+      rooms_rebuild(); if(!defined) login_open(NULL);
+    }
 
     while (!G.quit) {
         ULONG wsig = 0, lsig = 0, sigs;
@@ -2107,10 +3345,15 @@ int gui_run(void)
         if (G.lwin_obj)
             GetAttr(WINDOW_SigMask, G.lwin_obj, &lsig);
         input_events();
+        if(G.defer_display && !G.panel_depth && !G.iconified) { G.defer_display=0; load_chat_font(); apply_theme(theme_find(G.prefs.theme)); }
+        refresh_plugins();
         if (G.dirty)
             redraw_dirty();
-        sigs = Wait(wsig | lsig | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C |
+        if(G.app_port) wsig|=1UL<<G.app_port->mp_SigBit;
+        sigs = Wait(wsig | lsig | arexx_signal() | prefs_service_signal(G.prefs_service) | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C |
                     (G.dirty_sig >= 0 ? 1UL << G.dirty_sig : 0));
+        if (sigs & arexx_signal()) arexx_handle();
+        if (sigs & prefs_service_signal(G.prefs_service)) handle_preferences();
         if (sigs & SIGBREAKF_CTRL_C)
             G.quit = 1;
         if (sigs & (1UL << G.port->mp_SigBit))
@@ -2121,10 +3364,14 @@ int gui_run(void)
             handle_login();
     }
     remember_window();
-    prefs_save(&G.prefs);
+    prefs_save_client_state();
 
 out:
+    plugins_stop(); arexx_stop();
+    prefs_service_stop(G.prefs_service); G.prefs_service = NULL;
     worker_stop();
+    servers_cleanup();
+    images_reset();
     login_close();
     close_main();
     free_list(&G.room_list);
@@ -2143,6 +3390,10 @@ out:
                 netmsg_free((NetMsg *)msg);
         DeleteMsgPort(G.port);
     }
+    if (G.reopen_draft) { FreeVec(G.reopen_draft); G.reopen_draft = NULL; }
+    if (G.chat_font) { CloseFont(G.chat_font); G.chat_font = NULL; }
+    if (G.code_font) { CloseFont(G.code_font); G.code_font = NULL; }
+    avatar_reset();
     close_libs();
     return rc;
 }

@@ -1,0 +1,4 @@
+name=Timestamp
+version=1.0
+author=AmiRocket SDK
+description=Inserts the local time into the message composer.

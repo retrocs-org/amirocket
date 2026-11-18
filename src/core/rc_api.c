@@ -64,6 +64,92 @@ void rc_cleanup(RcClient *c)
     memset(c->token, 0, sizeof(c->token));
 }
 
+static int set_err(RcClient *c, int code, const char *fmt, const char *arg);
+
+/* File routes use browser cookies as well as REST headers. Only the initial
+ * URL may use workspace credentials; HTTPS storage redirects are credential-free. */
+static int download_url(const RcClient *c,const char *url,const ServerUrl *previous,const char *previous_path,ServerUrl *origin,Buf *path)
+{
+    const char *authority,*end; char base[320],err[80]; size_t n;
+    if(!url || !*url || strlen(url)>2047 || strpbrk(url,"\r\n\t ") || strchr(url,'#')) return -1;
+    buf_clear(path);
+    if(!ar_strncasecmp(url,"http://",7)||!ar_strncasecmp(url,"https://",8)||!strncmp(url,"//",2)) {
+        authority=strstr(url,"://"); authority=authority?authority+3:url+2;
+        end=authority; while(*end && *end!='/' && *end!='?') end++;
+        if(memchr(authority,'@',(size_t)(end-authority))) return -1;
+        n=(size_t)(end-url);
+        if(!strncmp(url,"//",2)) {
+            if(n+7>=sizeof(base)) return -1;
+            snprintf(base,sizeof(base),"%s:%.*s",previous&&previous->tls?"https":"http",(int)n,url);
+        } else { if(n>=sizeof(base)) return -1; memcpy(base,url,n); base[n]=0; }
+        if(url_parse_server(base,origin,err,sizeof(err))<0) return -1;
+        if(*end!='/') buf_putc(path,'/');
+        buf_puts(path,end);
+    } else {
+        if(strchr(url,':')) return -1;
+        *origin=previous?*previous:c->url;
+        if(*url=='/') buf_puts(path,url);
+        else if(previous_path) {
+            const char *q=strchr(previous_path,'?'),*slash; size_t len=q?(size_t)(q-previous_path):strlen(previous_path);
+            if(*url=='?') buf_append(path,previous_path,len);
+            else {
+                slash=previous_path+len; while(slash>previous_path && slash[-1]!='/') slash--;
+                buf_append(path,previous_path,(size_t)(slash-previous_path));
+            }
+            buf_puts(path,url);
+        } else { buf_puts(path,c->url.base); buf_putc(path,'/'); buf_puts(path,url); }
+    }
+    return path->oom?-1:0;
+}
+static int same_origin(const ServerUrl *a,const ServerUrl *b)
+{
+    return !ar_strcasecmp(a->host,b->host) && a->port==b->port && a->tls==b->tls;
+}
+int rc_download(RcClient *c,const char *url,Buf *data)
+{
+    Buf path,next_path,hdr; HttpResponse response; HttpClient external;
+    ServerUrl origin,next_origin; size_t saved_max; int rc=RC_ERR_HTTP,hops,auth=1,external_ready=0;
+    c->err[0]=0; buf_init(&path); buf_init(&next_path); buf_init(&hdr); http_response_init(&response);
+    if(download_url(c,url,NULL,NULL,&origin,&path)<0) { rc=set_err(c,RC_ERR_ARGS,"Invalid attachment URL",NULL); goto done; }
+    if(!same_origin(&origin,&c->url)) { rc=set_err(c,RC_ERR_ARGS,"External attachment links are not downloaded directly",NULL); goto done; }
+    buf_printf(&hdr,"X-Auth-Token: %s\r\nX-User-Id: %s\r\nCookie: rc_uid=%s; rc_token=%s\r\n",c->token,c->user_id,c->user_id,c->token);
+    if(hdr.oom) { rc=RC_ERR_NOMEM; goto done; }
+    for(hops=0;hops<4;hops++) {
+        HttpClient *http=&c->http;
+        if(!same_origin(&origin,&c->url)) {
+            auth=0;
+            if(!origin.tls) { rc=set_err(c,RC_ERR_HTTP,"Refusing an insecure file redirect",NULL); break; }
+            if(external_ready) http_close(&external);
+            http_init(&external,c->http.net,origin.host,origin.port,origin.tls,c->http.opt.verify);
+            external.progress=c->http.progress; external.progress_ctx=c->http.progress_ctx;
+            external_ready=1; http=&external;
+        }
+        saved_max=http->max_body; http->max_body=c->http.transfer_limit?c->http.transfer_limit:8UL*1024UL*1024UL;
+        rc=http_request(http,"GET",buf_str(&path),auth?buf_str(&hdr):NULL,NULL,0,&response);
+        http->max_body=saved_max;
+        if(rc<0) { rc=set_err(c,RC_ERR_NET,"%s",http->err); break; }
+        if(response.status==301||response.status==302||response.status==303||response.status==307||response.status==308) {
+            if(hops==3) { rc=set_err(c,RC_ERR_HTTP,"Too many file redirects",NULL); break; }
+            if(!response.location[0] || download_url(c,response.location,&origin,buf_str(&path),&next_origin,&next_path)<0) {
+                rc=set_err(c,RC_ERR_HTTP,"Invalid or missing file redirect",NULL); break;
+            }
+            if(origin.tls && !next_origin.tls) { rc=set_err(c,RC_ERR_HTTP,"Refusing an insecure file redirect",NULL); break; }
+            origin=next_origin; buf_clear(&path); buf_puts(&path,buf_str(&next_path));
+            if(path.oom) { rc=RC_ERR_NOMEM; break; }
+            http_response_free(&response); http_response_init(&response); continue;
+        }
+        if(response.status!=200) {
+            snprintf(c->err,sizeof(c->err),"File download failed (HTTP %d)%s",response.status,response.status==401||response.status==403?" - sign in again or check file access":"");
+            rc=RC_ERR_HTTP; break;
+        }
+        if(strstr(response.content_type,"text/html")) { rc=set_err(c,RC_ERR_HTTP,"Server returned a login/error page instead of a file",NULL); break; }
+        buf_free(data); *data=response.body; buf_init(&response.body); rc=RC_OK; break;
+    }
+done:
+    if(external_ready) http_close(&external);
+    buf_free(&path); buf_free(&next_path); buf_free(&hdr); http_response_free(&response); return rc;
+}
+
 /* ---- dates --------------------------------------------------------- */
 
 static ar_ms json_date(const JDoc *d, int i)
@@ -203,7 +289,18 @@ static int parse_room(const JDoc *d, int o, RcRoom *r)
     r->type = t[0] ? t[0] : 'c';
     r->unread = (int)json_ll(d, json_get(d, o, "unread"), 0);
     r->alert = json_bool(d, json_get(d, o, "alert"), 0);
+    { long long user=json_ll(d,json_get(d,o,"userMentions"),0),group=json_ll(d,json_get(d,o,"groupMentions"),0);
+      if(user<0) user=0;
+      if(group<0) group=0;
+      if(user>2147483647) user=2147483647;
+      if(group>2147483647) group=2147483647;
+      r->mentions=user+group>2147483647?2147483647:(int)(user+group);
+    }
+    r->last_seen_ms=json_date(d,json_get(d,o,"ls"));
     r->open = json_bool(d, json_get(d, o, "open"), 1);
+    r->member_count = (int)json_ll(d, json_get(d, o, "usersCount"), 0);
+    if (json_type(d, json_get(d, o, "uids")) == JT_ARRAY)
+        r->member_count = json_size(d, json_get(d, o, "uids"));
     r->favorite = json_bool(d, json_get(d, o, "f"), 0);
     r->updated_ms = json_date(d, json_get(d, o, "_updatedAt"));
     if (!r->name) {
@@ -255,6 +352,53 @@ static int parse_msg(const JDoc *d, int o, RcMsg *m)
             if (m->attachment && !m->n_attachments)
                 m->n_attachments = 1;
         }
+    }
+    if (json_type(d, att) == JT_ARRAY) {
+        int j, n = json_size(d, att);
+        if (n > 32) n = 32;
+        m->files = (RcAttachment *)ar_calloc((size_t)n, sizeof(RcAttachment));
+        if (n && !m->files) { rc_msg_free(m); return -1; }
+        for (j = 0; j < n; j++) {
+            int a = json_at(d, att, j);
+            char *link = dup_field(d, a, "title_link");
+            char *image = dup_field(d, a, "image_url");
+            RcAttachment *f;
+            if (!link || !*link) { ar_free(link); link = image; image = NULL; }
+            if (!link) link = dup_field(d, a, "audio_url");
+            if (!link) link = dup_field(d, a, "video_url");
+            if (!link || !*link) { ar_free(link); ar_free(image); continue; }
+            f = &m->files[m->file_count++];
+            f->url = link;
+            f->size=json_ll(d,json_get(d,a,"size"),0);
+            if(f->size<=0) f->size=json_ll(d,json_get(d,a,"image_size"),0);
+            if(f->size<0) f->size=0;
+            f->title = dup_field(d, a, "title");
+            if (!f->title) f->title = ar_strdup(m->attachment ? m->attachment : "attachment");
+            f->image = image != NULL || !json_is_null(d, json_get(d, a, "image_url"));
+            ar_free(image);
+        }
+    }
+    if(m->file_count==1 && !m->files[0].size) {
+        long long size=json_ll(d,json_path(d,o,"file.size"),0); if(size>0) m->files[0].size=size;
+    }
+    if (!m->file_count) {
+        int f = json_get(d, o, "file");
+        char *id = dup_field(d, f, "_id");
+        char *name = dup_field(d, f, "name");
+        char *mime = dup_field(d, f, "type");
+        if (id && name) {
+            RcAttachment *files = (RcAttachment *)ar_realloc(m->files, sizeof(RcAttachment));
+            if (files) {
+                Buf link; buf_init(&link); buf_puts(&link, "file-upload/");
+                url_encode(&link, id); buf_putc(&link, '/'); url_encode(&link, name);
+                m->files = files; memset(files, 0, sizeof(*files));
+                files[0].url = buf_detach(&link); files[0].title = ar_strdup(name);
+                files[0].image = mime && !strncmp(mime, "image/", 6);
+                files[0].size=json_ll(d,json_get(d,f,"size"),0); if(files[0].size<0) files[0].size=0; m->file_count = 1;
+                buf_free(&link);
+            }
+        }
+        ar_free(id); ar_free(name); ar_free(mime);
     }
     {   /* "reactions": { ":heart_eyes:": { "usernames": [...] }, ... } */
         int rx = json_get(d, o, "reactions");
@@ -459,6 +603,76 @@ int rc_logout(RcClient *c)
     return rc;
 }
 
+int rc_presence(RcClient *c, char **out)
+{
+    RcResp r; Buf text; int rc, users, n, i;
+    *out = NULL; resp_init(&r); buf_init(&text);
+    rc = rc_call(c, "GET", "/api/v1/users.presence", NULL, 1, &r);
+    if (rc != RC_OK) goto done;
+    users = json_get(&r.doc, 0, "users");
+    if (json_type(&r.doc, users) != JT_ARRAY) { rc = RC_ERR_PROTO; goto done; }
+    n = json_size(&r.doc, users); if (n > 1024) n = 1024;
+    for (i = 0; i < n; i++) {
+        char name[96], status[16]; int u = json_at(&r.doc, users, i);
+        if (json_str(&r.doc, json_get(&r.doc, u, "username"), name, sizeof(name)) <= 0 || strpbrk(name, "\t\r\n")) continue;
+        if (json_str(&r.doc, json_get(&r.doc, u, "status"), status, sizeof(status)) <= 0) continue;
+        if (strcmp(status,"online") && strcmp(status,"away") && strcmp(status,"busy") && strcmp(status,"offline")) continue;
+        buf_printf(&text, "%s\t%s\n", name, status);
+    }
+    if (text.oom) rc = RC_ERR_NOMEM;
+    else *out = buf_detach(&text);
+done:
+    buf_free(&text); resp_free(&r); return rc;
+}
+
+int rc_avatar(RcClient *c, const char *username, Buf *data)
+{
+    Buf path, hdr; HttpResponse r; size_t saved_max; int rc;
+    if (!username || !*username || strlen(username) > 95 || strchr(username, ',')) return RC_ERR_ARGS;
+    buf_init(&path); buf_init(&hdr); http_response_init(&r);
+    buf_puts(&path, c->url.base); buf_puts(&path, "/api/v1/avatar/"); url_encode(&path, username);
+    buf_puts(&path, "?format=png&size=32");
+    /* This endpoint accepts cookies rather than the usual API auth headers. */
+    buf_printf(&hdr, "Cookie: rc_uid=%s; rc_token=%s\r\n", c->user_id, c->token);
+    if (path.oom || hdr.oom) { rc = RC_ERR_NOMEM; goto done; }
+    saved_max = c->http.max_body; c->http.max_body = 256UL * 1024UL;
+    rc = http_request(&c->http, "GET", buf_str(&path), buf_str(&hdr), NULL, 0, &r);
+    if (rc == 0 && (r.status == 404 || (r.status == 200 && strstr(r.content_type, "text/html")))) {
+        /* Older workspaces expose the same avatar service outside /api/v1. */
+        http_response_free(&r); http_response_init(&r); buf_clear(&path);
+        buf_puts(&path, c->url.base); buf_puts(&path, "/avatar/"); url_encode(&path, username);
+        buf_puts(&path, "?format=png&size=32");
+        rc = path.oom ? -1 : http_request(&c->http, "GET", buf_str(&path), buf_str(&hdr), NULL, 0, &r);
+    }
+    c->http.max_body = saved_max;
+    if (rc < 0) { rc = RC_ERR_NET; goto done; }
+    if (r.status != 200 || strncmp(r.content_type, "image/", 6) || strstr(r.content_type,"svg")) { rc = RC_ERR_HTTP; goto done; }
+    buf_free(data); *data = r.body; buf_init(&r.body); rc = RC_OK;
+done:
+    buf_free(&path); if (hdr.data) memset(hdr.data, 0, hdr.len);
+    buf_free(&hdr); http_response_free(&r); return rc;
+}
+
+int rc_dm_participants(const RcRoom *r, const char *me)
+{
+    const char *p; int n = 0, have_me = 0;
+    if (r->type != 'd') return 0;
+    if (r->member_count > 2) return r->member_count;
+    if (!strchr(r->name, ',')) return 0;
+    for (p = r->name; *p;) {
+        const char *end = strchr(p, ','), *last;
+        if (!end) end = p + strlen(p);
+        while (p < end && (*p == ' ' || *p == '\t')) p++;
+        last = end; while (last > p && (last[-1] == ' ' || last[-1] == '\t')) last--;
+        if (last > p) {
+            n++;
+            if (me && strlen(me) == (size_t)(last-p) && !ar_strncasecmp(p,me,(size_t)(last-p))) have_me = 1;
+        }
+        p = *end ? end + 1 : end;
+    }
+    return n + (have_me ? 0 : 1);
+}
+
 int rc_rooms(RcClient *c, ar_ms updated_since, RcRoomList *out)
 {
     Buf path;
@@ -541,6 +755,7 @@ int rc_history(RcClient *c, const char *rid, char type, int count, ar_ms before,
         buf_puts(&path, "&latest=");
         url_encode(&path, iso);
     }
+    if (before > 0) buf_puts(&path, "&inclusive=false");
     resp_init(&r);
     rc = rc_call(c, "GET", buf_str(&path), NULL, 1, &r);
     buf_free(&path);
@@ -617,6 +832,10 @@ int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo)
     }
     resp_init(&r);
     rc = rc_call(c, "POST", "/api/v1/chat.sendMessage", buf_str(&body), 1, &r);
+    if(rc==RC_ERR_NET && c->http.sent) {
+        char detail[128]; ar_strlcpy(detail,c->err,sizeof(detail));
+        snprintf(c->err,sizeof(c->err),"Delivery unconfirmed; check the conversation before resending. %.120s",detail);
+    }
     buf_free(&body);
     if (rc == RC_OK && echo) {
         RcMsg msg;
@@ -628,6 +847,62 @@ int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo)
     }
     resp_free(&r);
     return rc;
+}
+
+int rc_create_room(RcClient *c, char type, const char *name, const char *members, RcRoomList *out)
+{
+    Buf body, users; RcResp r; int rc, o, count = 0; const char *p;
+    const char *path = type == 'c' ? "/api/v1/channels.create" : type == 'p' ? "/api/v1/groups.create" : "/api/v1/im.create";
+    if ((type != 'c' && type != 'p' && type != 'd') || !out)
+        return set_err(c, RC_ERR_ARGS, "Invalid conversation type", NULL);
+    if (type != 'd' && (!name || !*name || strlen(name) > 128 || strpbrk(name, " \t\r\n")))
+        return set_err(c, RC_ERR_ARGS, "Enter a channel name without spaces", NULL);
+    if (members && strlen(members) > 3000) return set_err(c, RC_ERR_ARGS, "Too many usernames", NULL);
+    buf_init(&body); buf_init(&users);
+    buf_puts(&body, type == 'd' ? "{\"usernames\":" : "{\"name\":");
+    if (type != 'd') { json_put_string(&body, name); buf_puts(&body, ",\"members\":["); }
+    p = members ? members : "";
+    while (*p) {
+        const char *end = strchr(p, ','); char user[97]; size_t len; const char *a = p;
+        if (!end) end = p + strlen(p);
+        while (a < end && (*a == ' ' || *a == '\t' || *a == '@')) a++;
+        len = end - a; while (len && (a[len-1] == ' ' || a[len-1] == '\t')) len--;
+        if (len) {
+            size_t j;
+            if (len > 96 || count >= 32) goto invalid;
+            for (j = 0; j < len; j++) if ((unsigned char)a[j] <= 32 || a[j] == '"' || a[j] == '\\') goto invalid;
+            memcpy(user, a, len); user[len] = 0;
+            if (count++) { buf_putc(&users, ','); if (type != 'd') buf_putc(&body, ','); }
+            buf_puts(&users, user); if (type != 'd') json_put_string(&body, user);
+        }
+        p = *end ? end + 1 : end;
+    }
+    if (type == 'd') { if (!count) goto invalid; json_put_string(&body, buf_str(&users)); }
+    else buf_putc(&body, ']');
+    buf_putc(&body, '}');
+    if (body.oom || users.oom) { rc = set_err(c, RC_ERR_NOMEM, "Out of memory", NULL); goto finish; }
+    resp_init(&r); rc = rc_call(c, "POST", path, buf_str(&body), 1, &r);
+    if (rc == RC_OK) {
+        RcRoom room; char rid[64];
+        o = json_get(&r.doc, 0, type == 'c' ? "channel" : type == 'p' ? "group" : "room");
+        if (json_str(&r.doc, json_get(&r.doc, o, "_id"), rid, sizeof(rid)) <= 0 &&
+            json_str(&r.doc, json_get(&r.doc, o, "rid"), rid, sizeof(rid)) <= 0) {
+            rc = set_err(c, RC_ERR_PROTO, "Server did not return a room id", NULL);
+        } else {
+            memset(&room, 0, sizeof(room));
+            room.rid = ar_strdup(rid); room.type = type; room.open = 1;
+            room.name = ar_strdup(type == 'd' ? buf_str(&users) : name);
+            room.member_count = count + 1;
+            if (!room.rid || !room.name || list_push_room(out, &room) < 0) {
+                rc_room_free(&room); rc = set_err(c, RC_ERR_NOMEM, "Out of memory", NULL);
+            }
+        }
+    }
+    resp_free(&r);
+finish:
+    buf_free(&body); buf_free(&users); return rc;
+invalid:
+    rc = set_err(c, RC_ERR_ARGS, "Enter up to 32 comma-separated usernames", NULL); goto finish;
 }
 
 int rc_mark_read(RcClient *c, const char *rid)
@@ -759,6 +1034,9 @@ void rc_msg_free(RcMsg *m)
     ar_free(m->type);
     ar_free(m->tmid);
     ar_free(m->attachment);
+    { int i; for (i = 0; i < m->file_count; i++) {
+        ar_free(m->files[i].title); ar_free(m->files[i].url);
+    } ar_free(m->files); }
     ar_free(m->reactions);
     memset(m, 0, sizeof(*m));
 }

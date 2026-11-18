@@ -5,3 +5,8 @@ qa-results/
 .DS_Store
 __pycache__/
 .incoming/
+outputs/
+work/
+dist/
+BUILD-PROVENANCE.json
+*.dSYM/

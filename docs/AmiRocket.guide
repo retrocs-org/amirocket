@@ -1,0 +1,90 @@
+@DATABASE AmiRocket.guide
+@NODE MAIN "AmiRocket"
+@{b}AmiRocket - native Rocket.Chat for AmigaOS 3.2@{ub}
+
+@{"Installation and upgrades" LINK INSTALL}
+@{"Everyday use" LINK USE}
+@{"Preferences and plugins" LINK PREFS}
+@{"ARexx and dock integration" LINK REXX}
+@{"Uninstall" LINK REMOVE}
+@{"Licence and source" LINK SOURCE}
+@ENDNODE
+@NODE INSTALL "Install or update"
+Requires AmigaOS 3.2, 68020+, a compatible bsdsocket.library TCP/IP stack,
+and AmiSSL 5.1 or newer for HTTPS. ReAction and picture datatypes come from
+AmigaOS. Additional image formats may require suitable picture datatypes.
+
+Extract the complete archive and double-click Install. Select Install/update
+and the parent drawer (default SYS:Utilities). AmiRocket and AmiRocketPrefs
+remain together in its AmiRocket drawer. Close both before updating.
+
+Updates preserve ENVARC:AmiRocket.prefs, custom icons and unrelated plugins.
+The installer never imports account settings from a distribution archive.
+You may choose a Workbench startup entry. Existing per-server auto-connect
+preferences decide which servers connect; installation does not change them.
+
+Shell installation: CD to the extracted AmiRocket drawer, then execute:
+ Execute scripts/Install-AmiRocket DEST=SYS:Utilities/AmiRocket
+
+Shell launch: Stack 65536, then AmiRocket. Workbench icons request this stack.
+@ENDNODE
+@NODE USE "Using AmiRocket"
+Add servers in AmiRocketPrefs. Right-click a server to connect, disconnect,
+or edit it. Select its root for connection events and failures.
+
+Enter sends a message. Shift+Enter inserts a new line. Amiga+C/X/V provide
+clipboard editing. Select a received message and Amiga+C copies its text.
+Amiga+U selects the next unread room; Amiga+L jumps to the new-message marker.
+Unread rooms are bold; @ badges indicate mentions. Room history uses polling.
+
+Attachments display server-reported sizes. Click an image to expand it or
+use Room / Save selected attachment to save. Unsupported previews offer Save.
+Downloads are limited to 8 MiB, previews to 2 MiB and one million pixels.
+Cancellation may wait for the current network read, up to 30 seconds.
+
+If delivery is unconfirmed, check the conversation before resending. AmiRocket
+never automatically replays a message after a lost response. Drafts are kept.
+Project / Iconify (Amiga+H) keeps connections active behind a Workbench icon.
+@ENDNODE
+@NODE PREFS "Preferences and plugins"
+Launch AmiRocketPrefs beside the client. Use applies settings for this session;
+Save also writes ENVARC:AmiRocket.prefs. It is the single configuration file
+for servers, appearance, performance, helpers and plugin options.
+
+Remember login saves an authentication token, never the password. Log out and
+forget login revokes the token. Do not share your personal configuration file.
+
+Timestamp and Quick Reply are bundled, disabled unless explicitly enabled.
+The separately distributed plugin SDK contains headers, source examples and
+ARexx scripts. SDK and example licences/notices accompany their source.
+@ENDNODE
+@NODE REXX "ARexx and dock integration"
+The public port is AMIROCKET (additional clients use AMIROCKET.2 etc.).
+HELP and CAPABILITIES describe commands. STATUS, DOCKSTATUS and SERVERSTATUS
+supply state. SHOW, ICONIFY and CONNECT/DISCONNECT allow dock control.
+Version 2 subscriptions carry epoch/sequence/drop metadata for recovery.
+
+AmiRocketMonitor is the native receiver example. Shell: Stack 65536, then
+AmiRocketMonitor. Ctrl-C exits. Rexx/ contains ready-to-adapt scripts.
+A real NovaDock widget still needs its own integration and rendering tests.
+@ENDNODE
+@NODE REMOVE "Uninstall"
+From an extracted release drawer, double-click Install, choose Uninstall and
+select the parent of the installed AmiRocket drawer. The installer removes
+only its known managed files and owned Workbench startup entry.
+
+ENVARC:AmiRocket.prefs and any unrelated files/plugins are kept. The drawer may
+remain when custom files are present. To forget accounts, use Log out and
+forget login before uninstalling. You may remove the saved configuration
+manually if you no longer want it. Updates never delete this file.
+@ENDNODE
+@NODE SOURCE "Licence and corresponding source"
+AmiRocket: GPL-3.0-or-later, copyright 2026 Tommy Froessman and contributors.
+See LICENSE and COPYRIGHT. Beam68-derived release tools retain their MIT
+notice in licenses/Beam68-release-tools.txt.
+
+The Source drawer in the runtime archive and the versioned source ZIP contain the
+corresponding source, Makefile, SDK, release scripts and regression tests.
+README.md and docs/RELEASING.md document rebuilding. VERSION identifies this
+release; BUILD-PROVENANCE.json records exact native input/output hashes.
+@ENDNODE

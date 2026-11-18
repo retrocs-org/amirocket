@@ -56,12 +56,20 @@ static void set_tr_err(HttpClient *c, const char *what)
         snprintf(c->err, sizeof(c->err), "%s", what);
 }
 
+static int report_progress(HttpClient *c)
+{
+    if(c->progress && c->progress(c->progress_ctx,c->received,c->total)) {
+        c->cancelled=1; snprintf(c->err,sizeof(c->err),"Download cancelled"); return -1;
+    }
+    return 0;
+}
 static int fill(HttpClient *c, Attempt *a)
 {
     int n;
 
     if (c->rpos < c->rlen)
         return 1;
+    if(report_progress(c)<0) return -1;
     n = c->tr.read(c->tr.ctx, c->rbuf, (int)sizeof(c->rbuf));
     if (n < 0) {
         set_tr_err(c, "Receive failed");
@@ -128,6 +136,7 @@ static int read_exact(HttpClient *c, Attempt *a, Buf *out, size_t n, size_t limi
         buf_append(out, c->rbuf + c->rpos, (size_t)take);
         c->rpos += take;
         n -= (size_t)take;
+        c->received=out->len; if(report_progress(c)<0) return -1;
     }
     return 0;
 }
@@ -146,6 +155,7 @@ static int read_to_eof(HttpClient *c, Attempt *a, Buf *out, size_t limit)
         }
         buf_append(out, c->rbuf + c->rpos, (size_t)(c->rlen - c->rpos));
         c->rpos = c->rlen;
+        c->received=out->len; if(report_progress(c)<0) return -1;
         if (out->oom) {
             snprintf(c->err, sizeof(c->err), "Out of memory");
             return -1;
@@ -225,6 +235,7 @@ static int write_all(HttpClient *c, const char *p, size_t n)
             set_tr_err(c, "Send failed");
             return -1;
         }
+        c->sent += (size_t)w;
         p += w;
         n -= (size_t)w;
     }
@@ -256,7 +267,7 @@ static int attempt(HttpClient *c, const char *method, const char *path, const ch
     int reused, rc = -1, keep_alive = 1, chunked = 0, http10 = 0, nheaders;
     long long clen = -1;
 
-    *retry = 0;
+    *retry = 0; c->sent=0;
     a.got_bytes = 0;
     if (ensure_connected(c) < 0)
         return -1;
@@ -345,6 +356,9 @@ static int attempt(HttpClient *c, const char *method, const char *path, const ch
         }
     }
 
+    c->total=clen>0?(size_t)clen:0;
+    if(report_progress(c)<0) goto out;
+
     if (!strcmp(method, "HEAD") || resp->status == 204 || resp->status == 304) {
         /* no body */
     } else if (chunked) {
@@ -381,9 +395,11 @@ int http_request(HttpClient *c, const char *method, const char *path,
 {
     int retry, rc;
 
-    c->err[0] = 0;
+    c->err[0] = 0; c->received=c->total=0; c->cancelled=0;
+    if(report_progress(c)<0) return -1;
     rc = attempt(c, method, path, extra_headers, body, body_len, resp, &retry);
-    if (rc < 0 && retry) {
+    if (rc < 0 && retry && !c->cancelled &&
+        (!strcmp(method,"GET") || !strcmp(method,"HEAD"))) {
         http_response_free(resp);
         http_response_init(resp);
         rc = attempt(c, method, path, extra_headers, body, body_len, resp, &retry);

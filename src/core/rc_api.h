@@ -43,7 +43,10 @@ typedef struct {
     char  type;        /* 'c' public, 'p' private, 'd' direct, 'l' livechat */
     int   unread;
     int   alert;
+    int   mentions;   /* userMentions + groupMentions */
+    ar_ms last_seen_ms; /* subscription ls, captured before marking read */
     int   open;
+    int   member_count; /* authoritative group size when supplied by server */
     int   favorite;    /* starred by the user ("f") */
     ar_ms updated_ms;
 } RcRoom;
@@ -57,6 +60,12 @@ typedef struct {
 } RcRoomList;
 
 typedef struct {
+    char *title, *url;
+    int image;
+    long long size;   /* encoded bytes reported by server, 0 = unknown */
+} RcAttachment;
+
+typedef struct {
     char *id;
     char *rid;
     char *username;
@@ -66,6 +75,8 @@ typedef struct {
     char *tmid;           /* thread parent id, or NULL */
     char *attachment;     /* first attachment title / file name, or NULL */
     char *reactions;      /* "heart_eyes 1\n+1 2" (shortcode count per line), or NULL */
+    RcAttachment *files;
+    int   file_count;
     int   n_attachments;
     int   edited;
     ar_ms ts_ms;
@@ -107,10 +118,20 @@ int rc_rooms(RcClient *c, ar_ms updated_since, RcRoomList *out);
 int rc_history(RcClient *c, const char *rid, char type, int count, ar_ms before, RcMsgList *out);
 int rc_sync(RcClient *c, const char *rid, ar_ms last_update, RcMsgList *out);
 int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo);
+/* Create public/private channels or open a single/group DM. Members are comma-separated usernames. */
+int rc_create_room(RcClient *c, char type, const char *name, const char *members, RcRoomList *out);
 int rc_mark_read(RcClient *c, const char *rid);
 int rc_room_topic(RcClient *c, const char *rid, char *out, size_t outsz);  /* "" if none */
 /* Room members as lines "username\tname\tstatus" (UTF-8, ar_malloc'd). */
 int rc_room_members(RcClient *c, const char *rid, char type, int count, char **out);
+
+/* Download authenticated attachments; max 8 MiB. HTTPS storage redirects omit credentials. */
+int rc_download(RcClient *c, const char *url, Buf *data);
+
+/* Cosmetic metadata; failures must not interrupt chat. Presence is username\tstatus\n. */
+int rc_presence(RcClient *c, char **out);
+int rc_avatar(RcClient *c, const char *username, Buf *data); /* max 256 KiB */
+int rc_dm_participants(const RcRoom *room, const char *me);
 
 /* Data model helpers */
 void rc_room_free(RcRoom *r);

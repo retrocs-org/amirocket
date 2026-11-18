@@ -1,31 +1,9 @@
-Short:        Rocket.Chat client (ReAction, AmiSSL)
-Author:       Tommy Frössman
-Uploader:     Tommy Frössman
-Type:         comm/net
-Version:      0.1
-Requires:     AmigaOS 3.2, 68020+, bsdsocket.library, AmiSSL 5.1+
-Architecture: m68k-amigaos >= 3.2.0
+AmiRocket release documentation
 
-AmiRocket is a native Rocket.Chat client for AmigaOS 3.2. It connects to
-ordinary self-hosted Rocket.Chat servers over HTTPS.
+The distributable Aminet-style ReadMe is generated from VERSION and CHANGELOG.md
+by scripts/make-aminet-release.py during scripts/build-amiga.sh. Its build output
+is build/amiga/AmiRocket.readme and it appears as ReadMe in the runtime package.
 
-Features
- - Login with user name and password, two-factor codes (authenticator app
-   or e-mail), remembered login via auth token
- - Public channels, private groups and direct messages with unread counts
- - Message history, sending, and new/edited/deleted messages by polling
- - UTF-8 <-> ISO-8859-1 conversion with readable fallbacks for quotes,
-   dashes and common emoji
- - Network code runs in its own process: the GUI never blocks
- - SELFTEST and PROBE Shell modes for checking the setup
-
-Installation
- Copy AmiRocket anywhere and start it. AmiSSL 5 must be installed for
- https:// servers. Settings are stored in ENVARC:AmiRocket.prefs.
-
-Shell usage
- AmiRocket SELFTEST
- AmiRocket PROBE=https://chat.example.com [USER=name PASSWORD=pw] [CODE=n]
-
-Note: with "Remember login" enabled, the Rocket.Chat auth token is
-stored in ENVARC:AmiRocket.prefs. Use Project/Log out to revoke it.
+See AmiRocket.guide for installation, updates, use and removal, and RELEASING.md
+for the build-once/check/prepare/publish workflow. AmiRocket is licensed under
+GPL-3.0-or-later; see the repository LICENSE and COPYRIGHT files.

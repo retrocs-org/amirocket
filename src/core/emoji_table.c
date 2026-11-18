@@ -52,8 +52,9 @@ const EmojiInfo emoji_table[] = {
     { 0x2615UL, "coffee", "(coffee)" },   /* 47 */
     { 0x1F4A9UL, "poop", "(poo)" },   /* 48 */
     { 0x1F973UL, "partying_face", "\\o/" },   /* 49 */
+    { 0x1F970UL, "smiling_face_with_3_hearts", "<3" },   /* 50 */
 };
-const int emoji_count = 50;
+const int emoji_count = 51;
 
 const EmojiAlias emoji_aliases[] = {
     { "satisfied", 5 },
@@ -72,5 +73,7 @@ const EmojiAlias emoji_aliases[] = {
     { "clinking_glass", 46 },
     { "hankey", 48 },
     { "shit", 48 },
+    { "smiling_face_with_hearts", 50 },
+    { "smiling_face_with_three_hearts", 50 },
     { 0, 0 }
 };
