@@ -12,6 +12,8 @@ void prefs_service_publish(PrefsEndpoint *service, const Prefs *prefs);
 void prefs_update_free(PrefsUpdate *update);
 void prefs_service_plugins(PrefsEndpoint *service, const char *ids);
 int prefs_runtime_plugins(char *out, int size);
+void prefs_service_network(PrefsEndpoint *service,int slot,const char *text);
+int prefs_runtime_network(char *out,int size);
 int prefs_runtime_get(Prefs *out); /* effective settings of the first running client */
 int prefs_runtime_send_server(int slot,const ServerPrefs *server,int permanent);
 int prefs_runtime_send(const Prefs *prefs, int permanent); /* broadcasts, transfers ownership */

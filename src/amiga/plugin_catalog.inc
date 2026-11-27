@@ -25,21 +25,27 @@ static void catalog_add(PluginCatalog *c,const char *id,const char *path)
 }
 static void catalog_scan(PluginCatalog *c,const Prefs *prefs)
 {
-    int i; BPTR lock; struct FileInfoBlock *fib; char id[32],path[256];
+    int i; BPTR lock; struct FileInfoBlock *fib; char id[32],path[512],folder[512]; const char *base="PROGDIR:";
     memset(c,0,sizeof(*c)); NewList(&c->nodes);
+    base=prefs_extra(prefs,"workspace.data_dir",G.prefs_only?prefs_extra(prefs,"workspace.install_dir","PROGDIR:"):"PROGDIR:");
     /* Configured paths take precedence over files discovered in PROGDIR. */
     for(i=0;i<prefs->extra_count;i++) {
         const char *key=prefs->extra[i].key; size_t n=strlen(key);
         if(n>12 && n<44 && !strncmp(key,"plugin.",7) && !strcmp(key+n-5,".path")) {
-            memcpy(id,key+7,n-12); id[n-12]=0; catalog_add(c,id,prefs->extra[i].value);
+            memcpy(id,key+7,n-12); id[n-12]=0;
+            if(!ar_strncasecmp(prefs->extra[i].value,"PROGDIR:",8)) {
+                ar_strlcpy(path,base,sizeof(path)); if(AddPart(path,prefs->extra[i].value+8,sizeof(path))) catalog_add(c,id,path);
+            } else catalog_add(c,id,prefs->extra[i].value);
         }
     }
-    lock=Lock("PROGDIR:Plugins",ACCESS_READ); fib=AllocDosObject(DOS_FIB,NULL);
+    ar_strlcpy(folder,base,sizeof(folder));
+    if(!AddPart(folder,"Plugins",sizeof(folder))) return;
+    lock=Lock(folder,ACCESS_READ); fib=AllocDosObject(DOS_FIB,NULL);
     if(lock && fib && Examine(lock,fib)) while(ExNext(lock,fib)) {
         size_t n=strlen(fib->fib_FileName);
         if(fib->fib_DirEntryType<0 && n>4 && n<36 && !ar_strcasecmp(fib->fib_FileName+n-4,".arp")) {
             memcpy(id,fib->fib_FileName,n-4); id[n-4]=0;
-            snprintf(path,sizeof(path),"PROGDIR:Plugins/%s",fib->fib_FileName); catalog_add(c,id,path);
+            ar_strlcpy(path,folder,sizeof(path)); if(AddPart(path,fib->fib_FileName,sizeof(path))) catalog_add(c,id,path);
         }
     }
     if(fib) FreeDosObject(DOS_FIB,fib);

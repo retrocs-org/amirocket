@@ -41,7 +41,7 @@ AMIGA_OBJ := $(patsubst %.c,build/amiga/obj/%.o,$(AMIGA_SRC))
 
 all: amiga
 
-amiga: build/amiga/AmiRocket build/amiga/AmiRocketPrefs build/amiga/CreateIcons plugins
+amiga: build/amiga/AmiRocket build/amiga/AmiRocketPrefs build/amiga/CreateIcons plugins build/amiga/Sounds/Notification.8svx
 	cp assets/icon/AmiRocket.info build/amiga/AmiRocket.info
 	cp assets/icon/AmiRocket.info build/amiga/AmiRocketPrefs.info
 	@if [ -d "$(dir $(BUILDS_DIR))" ]; then mkdir -p "$(BUILDS_DIR)" && cp build/amiga/AmiRocket build/amiga/AmiRocket.info build/amiga/AmiRocketPrefs build/amiga/AmiRocketPrefs.info "$(BUILDS_DIR)/" && mkdir -p "$(BUILDS_DIR)/Plugins" && cp build/amiga/Plugins/*.arp build/amiga/Plugins/*.meta "$(BUILDS_DIR)/Plugins/" && cp build/amiga/AmiRocketMonitor "$(BUILDS_DIR)/" && mkdir -p "$(BUILDS_DIR)/SDK" "$(BUILDS_DIR)/Rexx" && cp -R sdk/. "$(BUILDS_DIR)/SDK/" && cp sdk/rexx/*.rexx "$(BUILDS_DIR)/Rexx/" && echo "-> $(BUILDS_DIR)/AmiRocket (+ preferences and plugins)"; fi
@@ -63,6 +63,10 @@ build/amiga/AmiRocket: $(AMIGA_OBJ)
 	$(AMIGA_CC) $(AMIGA_LDFLAGS) -o $@ $^
 	@ls -l $@
 
+build/amiga/obj/tests/test_core.o: $(wildcard tests/*.inc)
+
+build/amiga/obj/src/amiga/worker.o: src/amiga/network_queue.inc
+
 build/amiga/obj/src/amiga/gui.o: $(wildcard src/amiga/*.inc)
 
 build/amiga/AmiRocketPrefs: tools/prefs_main.c src/amiga/gui.c $(wildcard src/amiga/*.inc src/amiga/*.h) $(filter-out build/amiga/obj/src/amiga/main.o build/amiga/obj/src/amiga/gui.o,$(AMIGA_OBJ))
@@ -72,17 +76,27 @@ build/amiga/obj/%.o: %.c $(wildcard src/core/*.h src/amiga/*.h tests/*.h sdk/inc
 	@mkdir -p $(dir $@)
 	$(AMIGA_CC) $(AMIGA_CFLAGS) -c -o $@ $<
 
-host: build/host/rcli build/host/test_core build/host/test_multi
+host: build/host/rcli build/host/test_core build/host/test_multi build/host/realtime_probe build/host/realtime_check
+
+build/host/realtime_check: tests/realtime_check.c $(HOST_CORE) $(wildcard src/core/*.h src/posix/*.h)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ tests/realtime_check.c $(HOST_CORE) $(OPENSSL_LIBS)
+
+build/host/realtime_probe: tests/realtime_probe.c $(HOST_CORE) $(wildcard src/core/*.h src/posix/*.h)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) -o $@ tests/realtime_probe.c $(HOST_CORE) $(OPENSSL_LIBS)
 
 build/host/rcli: tools/rcli.c $(HOST_CORE) $(wildcard src/core/*.h src/posix/*.h)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CFLAGS) -o $@ tools/rcli.c $(HOST_CORE) $(OPENSSL_LIBS)
 
-build/host/test_core: tests/test_core.c tests/test_core_main.c $(HOST_CORE) $(wildcard src/core/*.h sdk/include/*.h)
+build/host/test_core: tests/download_fixture.h tests/test_core.c tests/test_core_main.c $(HOST_CORE) $(wildcard src/core/*.h sdk/include/*.h tests/*.inc)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CFLAGS) -o $@ tests/test_core.c tests/test_core_main.c $(HOST_CORE) $(OPENSSL_LIBS)
 
 test: host
+	python3 -B tests/test_realtime_recovery.py build/host/realtime_check
+	python3 -B tests/test_websocket.py build/host/realtime_probe
 	./build/host/test_core
 	python3 tests/integration.py build/host/rcli
 
@@ -120,7 +134,7 @@ clean:
 	rm -rf build
 
 # Disposable GUI integration checks. No credentials or network are used.
-build/amiga/AmiRocket-GUIQA: build/amiga/AmiRocketMonitorQA build/amiga/AmiRocket plugins tools/unread_qa.inc tools/worker_qa.c tools/dock_qa.inc tools/extensions_qa.inc tools/servers_qa.inc build/amiga/avatar.png tools/gui_qa.c $(wildcard src/amiga/*.inc) $(filter-out build/amiga/obj/src/amiga/main.o build/amiga/obj/src/amiga/gui.o build/amiga/obj/src/amiga/worker.o,$(AMIGA_OBJ)) $(wildcard src/amiga/*.h) src/amiga/gui.c
+build/amiga/AmiRocket-GUIQA: build/amiga/Sounds/Notification.8svx tests/download_fixture.h build/amiga/AmiRocketViewerQA tools/external_images_qa.inc build/amiga/AmiRocketMonitorQA build/amiga/AmiRocket plugins tools/qa_observation.h tools/release_soak_qa.inc tools/message_actions_qa.inc tools/release_polish_qa.inc tools/conversation_qa.inc tools/unread_qa.inc tools/worker_qa.c tools/dock_qa.inc tools/extensions_qa.inc tools/servers_qa.inc build/amiga/avatar.png tools/gui_qa.c $(wildcard src/amiga/*.inc) $(filter-out build/amiga/obj/src/amiga/main.o build/amiga/obj/src/amiga/gui.o build/amiga/obj/src/amiga/worker.o,$(AMIGA_OBJ)) $(wildcard src/amiga/*.h) src/amiga/gui.c
 	$(AMIGA_CC) $(AMIGA_CFLAGS) $(AMIGA_LDFLAGS) -o $@ tools/gui_qa.c tools/worker_qa.c $(filter-out build/amiga/obj/src/amiga/main.o build/amiga/obj/src/amiga/gui.o build/amiga/obj/src/amiga/worker.o,$(AMIGA_OBJ))
 
 .PHONY: qa-gui
@@ -150,12 +164,14 @@ build/host/test_multi: tests/test_multi.c $(HOST_CORE) $(wildcard src/core/*.h)
 	$(HOST_CC) $(HOST_CFLAGS) -o $@ tests/test_multi.c $(HOST_CORE) $(OPENSSL_LIBS)
 
 # Same monitor protocol code, with closed observation files for the smoke harness.
-build/amiga/AmiRocketMonitorQA: sdk/examples/rexx_monitor.c sdk/include/amirocket_rexx.h
+build/amiga/AmiRocketMonitorQA: sdk/examples/rexx_monitor.c sdk/include/amirocket_rexx.h tools/qa_observation.h
 	$(AMIGA_CC) $(AMIGA_CFLAGS) $(AMIGA_LDFLAGS) -DAR_MONITOR_QA -o $@ $<
 
-build/amiga/CreateIcons: tools/create_icons.c
+INSTALLER_OBJ := build/amiga/obj/src/amiga/prefs.o build/amiga/obj/src/amiga/mem_amiga.o build/amiga/obj/src/core/buf.o build/amiga/obj/src/core/util.o build/amiga/obj/src/core/url.o
+
+build/amiga/CreateIcons: tools/create_icons.c $(INSTALLER_OBJ)
 	@mkdir -p $(dir $@)
-	$(AMIGA_CC) $(AMIGA_CFLAGS) $(AMIGA_LDFLAGS) -o $@ $<
+	$(AMIGA_CC) $(AMIGA_CFLAGS) $(AMIGA_LDFLAGS) -o $@ $< $(INSTALLER_OBJ)
 
 .PHONY: release release-check release-prepare release-test release-stage package-project print-amiga-cflags
 print-amiga-cflags:
@@ -164,3 +180,17 @@ print-amiga-cflags:
 # Native website capture fixture: sample conversations, no credentials/network.
 build/amiga/AmiRocket-Screenshots: build/amiga/AmiRocket tools/screenshots.c $(wildcard src/amiga/*.inc)
 	$(AMIGA_CC) $(AMIGA_CFLAGS) $(AMIGA_LDFLAGS) -o $@ tools/screenshots.c $(filter-out build/amiga/obj/src/amiga/main.o build/amiga/obj/src/amiga/gui.o,$(AMIGA_OBJ))
+
+# Isolated native stand-in; not part of the installed application.
+build/amiga/AmiRocketViewerQA: tools/image_viewer_qa.c
+	@mkdir -p $(dir $@)
+	$(AMIGA_CC) $(AMIGA_CFLAGS) $(AMIGA_LDFLAGS) -o $@ $<
+
+build/amiga/Sounds/Notification.8svx: assets/sounds/Notification.8svx
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+build/amiga/obj/tests/test_core.o: tests/download_fixture.h
+
+build/amiga/SharedDataQA: tools/shared_data_qa.c $(INSTALLER_OBJ) build/amiga/obj/src/amiga/plugins.o plugins
+	$(AMIGA_CC) $(AMIGA_CFLAGS) $(AMIGA_LDFLAGS) -o $@ $< $(INSTALLER_OBJ) build/amiga/obj/src/amiga/plugins.o

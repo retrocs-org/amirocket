@@ -61,6 +61,7 @@ typedef struct {
 
 typedef struct {
     char *title, *url;
+    char *preview_url; /* server image_url; url remains the original download */
     int image;
     long long size;   /* encoded bytes reported by server, 0 = unknown */
 } RcAttachment;
@@ -74,6 +75,7 @@ typedef struct {
     char *type;           /* system message type ("uj", "ul", ...) or NULL */
     char *tmid;           /* thread parent id, or NULL */
     char *attachment;     /* first attachment title / file name, or NULL */
+    char *reaction_users; /* bounded shortcode TAB username rows for toggling own badge */
     char *reactions;      /* "heart_eyes 1\n+1 2" (shortcode count per line), or NULL */
     RcAttachment *files;
     int   file_count;
@@ -117,9 +119,22 @@ int rc_logout(RcClient *c);
 int rc_rooms(RcClient *c, ar_ms updated_since, RcRoomList *out);
 int rc_history(RcClient *c, const char *rid, char type, int count, ar_ms before, RcMsgList *out);
 int rc_sync(RcClient *c, const char *rid, ar_ms last_update, RcMsgList *out);
+int rc_send_id(RcClient *c,const char *rid,const char *text,const char *id,RcMsgList *echo);
+int rc_confirm_send(RcClient *c,const char *rid,const char *text,const char *id,RcMsgList *echo);
 int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo);
 /* Create public/private channels or open a single/group DM. Members are comma-separated usernames. */
+int rc_send_thread(RcClient *c,const char *rid,const char *tmid,const char *text,RcMsgList *echo);
+int rc_thread(RcClient *c,const char *tmid,int offset,RcMsgList *out,int *total);
+int rc_message_edit(RcClient *c,const char *rid,const char *id,const char *text,RcMsgList *echo);
+int rc_message_delete(RcClient *c,const char *rid,const char *id);
+int rc_reaction_has(const RcMsg *message,const char *emoji,const char *username);
+int rc_message_react(RcClient *c,const char *id,const char *emoji,int add);
 int rc_create_room(RcClient *c, char type, const char *name, const char *members, RcRoomList *out);
+int rc_search(RcClient *c,const char *rid,const char *query,int offset,int count,RcMsgList *out,int *total);
+/* Stream one temporary upload, then explicitly confirm it. No automatic replay. */
+int rc_upload(RcClient *c,const char *rid,const char *filename,size_t length,
+              int (*read_file)(void *,void *,int),void *ctx,char file_id[96]);
+int rc_upload_confirm(RcClient *c,const char *rid,const char *file_id);
 int rc_mark_read(RcClient *c, const char *rid);
 int rc_room_topic(RcClient *c, const char *rid, char *out, size_t outsz);  /* "" if none */
 /* Room members as lines "username\tname\tstatus" (UTF-8, ar_malloc'd). */
@@ -127,10 +142,12 @@ int rc_room_members(RcClient *c, const char *rid, char type, int count, char **o
 
 /* Download authenticated attachments; max 8 MiB. HTTPS storage redirects omit credentials. */
 int rc_download(RcClient *c, const char *url, Buf *data);
+int rc_download_to(RcClient *c,const char *url,int (*write)(void *,const void *,size_t),void *ctx);
 
 /* Cosmetic metadata; failures must not interrupt chat. Presence is username\tstatus\n. */
 int rc_presence(RcClient *c, char **out);
 int rc_avatar(RcClient *c, const char *username, Buf *data); /* max 256 KiB */
+const char *rc_attachment_preview_url(const RcAttachment *file);
 int rc_dm_participants(const RcRoom *room, const char *me);
 
 /* Data model helpers */

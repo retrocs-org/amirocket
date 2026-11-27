@@ -1,9 +1,14 @@
 #include "http.h"
 #include "util.h"
+#include "traffic.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#ifndef AR_VERSION
+#define AR_VERSION "development"
+#endif
 
 #define MAX_LINE     8192
 #define MAX_HEADERS  128
@@ -17,7 +22,7 @@ void http_init(HttpClient *c, const NetIface *net, const char *host, int port, i
     c->opt.tls = tls;
     c->opt.verify = verify;
     c->opt.timeout_s = 30;
-    ar_strlcpy(c->user_agent, "AmiRocket/0.1 (AmigaOS)", sizeof(c->user_agent));
+    ar_strlcpy(c->user_agent, "AmiRocket/" AR_VERSION " (AmigaOS)", sizeof(c->user_agent));
     c->max_body = 4UL * 1024UL * 1024UL;
 }
 
@@ -58,11 +63,12 @@ static void set_tr_err(HttpClient *c, const char *what)
 
 static int report_progress(HttpClient *c)
 {
-    if(c->progress && c->progress(c->progress_ctx,c->received,c->total)) {
-        c->cancelled=1; snprintf(c->err,sizeof(c->err),"Download cancelled"); return -1;
+    if(c->progress && c->progress(c->progress_ctx,c->upload_read && c->upload_done?c->upload_length:c->received,c->upload_read?c->upload_length:c->total)) {
+        c->cancelled=1; snprintf(c->err,sizeof(c->err),"%s cancelled",c->upload_read?"Upload":"Download"); return -1;
     }
     return 0;
 }
+static int cancel_wait(void *ctx) { return report_progress((HttpClient *)ctx)<0; }
 static int fill(HttpClient *c, Attempt *a)
 {
     int n;
@@ -117,13 +123,21 @@ static int read_line(HttpClient *c, Attempt *a, Buf *line)
     return 0;
 }
 
+static int body_append(HttpClient *c,Buf *out,const void *data,size_t size)
+{
+    if(c->stream_body) {
+        if(c->body_write(c->body_write_ctx,data,size)<0) {snprintf(c->err,sizeof(c->err),"Could not write downloaded data");return -1;}
+    } else if(buf_append(out,data,size)<0) {snprintf(c->err,sizeof(c->err),"Out of memory");return -1;}
+    c->body_received+=size;if(!c->upload_read)c->received=c->body_received;
+    return report_progress(c);
+}
 static int read_exact(HttpClient *c, Attempt *a, Buf *out, size_t n, size_t limit)
 {
-    if (out->len + n > limit) {
-        snprintf(c->err, sizeof(c->err), "Response too large (%lu bytes)", (unsigned long)(out->len + n));
+    if (c->body_received>limit || n>limit-c->body_received) {
+        snprintf(c->err, sizeof(c->err), "Response too large (%lu bytes)", (unsigned long)(c->body_received+n));
         return -1;
     }
-    if (buf_reserve(out, n) < 0) {
+    if (!c->stream_body && buf_reserve(out, n) < 0) {
         snprintf(c->err, sizeof(c->err), "Out of memory");
         return -1;
     }
@@ -133,10 +147,10 @@ static int read_exact(HttpClient *c, Attempt *a, Buf *out, size_t n, size_t limi
             return -1;
         avail = c->rlen - c->rpos;
         take = (size_t)avail < n ? avail : (int)n;
-        buf_append(out, c->rbuf + c->rpos, (size_t)take);
+        if(body_append(c,out,c->rbuf+c->rpos,(size_t)take)<0)return -1;
         c->rpos += take;
         n -= (size_t)take;
-        c->received=out->len; if(report_progress(c)<0) return -1;
+
     }
     return 0;
 }
@@ -149,13 +163,13 @@ static int read_to_eof(HttpClient *c, Attempt *a, Buf *out, size_t limit)
             return -1;
         if (r == 0)
             return 0;
-        if (out->len + (size_t)(c->rlen - c->rpos) > limit) {
+        if (c->body_received>limit || (size_t)(c->rlen-c->rpos)>limit-c->body_received) {
             snprintf(c->err, sizeof(c->err), "Response too large");
             return -1;
         }
-        buf_append(out, c->rbuf + c->rpos, (size_t)(c->rlen - c->rpos));
+        if(body_append(c,out,c->rbuf+c->rpos,(size_t)(c->rlen-c->rpos))<0)return -1;
         c->rpos = c->rlen;
-        c->received=out->len; if(report_progress(c)<0) return -1;
+
         if (out->oom) {
             snprintf(c->err, sizeof(c->err), "Out of memory");
             return -1;
@@ -264,13 +278,19 @@ static int attempt(HttpClient *c, const char *method, const char *path, const ch
 {
     Buf req, line;
     Attempt a;
+    char retry_header[128]="";
     int reused, rc = -1, keep_alive = 1, chunked = 0, http10 = 0, nheaders;
     long long clen = -1;
 
-    *retry = 0; c->sent=0;
+    c->body_received=0;c->stream_body=0;
+    *retry = 0; c->sent=0; c->deferred=0; c->upload_done=0;
+    if(c->before_request && c->before_request(c->scheduler_ctx)<0) {
+        c->deferred=1; resp->status=429; snprintf(c->err,sizeof(c->err),"Server cooling down; request not sent"); return 0;
+    }
+    if(report_progress(c)<0) return -1;
     a.got_bytes = 0;
-    if (ensure_connected(c) < 0)
-        return -1;
+    if (ensure_connected(c) < 0) return -1;
+    if(c->tr.interrupt)c->tr.interrupt(c->tr.ctx,c->progress?cancel_wait:NULL,c);
     reused = c->uses > 0;
 
     buf_init(&req);
@@ -283,14 +303,15 @@ static int attempt(HttpClient *c, const char *method, const char *path, const ch
     buf_printf(&req, "User-Agent: %s\r\nAccept: application/json\r\nConnection: keep-alive\r\n", c->user_agent);
     if (extra)
         buf_puts(&req, extra);
-    if (body) {
+    if(c->upload_read) {
+        buf_printf(&req,"Content-Type: %s\r\nContent-Length: %lu\r\n",c->upload_type,(unsigned long)c->upload_length);
+    } else if (body) {
         buf_printf(&req, "Content-Type: application/json\r\nContent-Length: %lu\r\n", (unsigned long)body_len);
     } else if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
         buf_puts(&req, "Content-Length: 0\r\n");
     }
     buf_puts(&req, "\r\n");
-    if (body && body_len)
-        buf_append(&req, body, body_len);
+
     if (req.oom) {
         snprintf(c->err, sizeof(c->err), "Out of memory");
         goto out;
@@ -300,6 +321,22 @@ static int attempt(HttpClient *c, const char *method, const char *path, const ch
         *retry = reused;
         goto out;
     }
+
+    if(c->upload_read) {
+        char chunk[4096]; size_t left=c->upload_length;
+        while(left) {
+            int want=left>sizeof(chunk)?(int)sizeof(chunk):(int)left;
+            int got;
+            c->received=c->upload_length-left; c->total=c->upload_length;
+            if(report_progress(c)<0) goto out;
+            got=c->upload_read(c->upload_ctx,chunk,want);
+            if(got<=0 || got>want) { snprintf(c->err,sizeof(c->err),"Could not read upload file"); goto out; }
+            if(write_all(c,chunk,got)<0) goto out;
+            left-=(size_t)got;
+        }
+        c->upload_done=1; c->received=c->total=c->upload_length;
+        if(report_progress(c)<0) goto out;
+    } else if(body && body_len && write_all(c,body,body_len)<0) goto out;
 
     /* Status line (skipping any 1xx interim responses). */
     for (;;) {
@@ -349,6 +386,8 @@ static int attempt(HttpClient *c, const char *method, const char *path, const ch
             ar_strlcpy(resp->content_type, v, sizeof(resp->content_type));
         } else if ((v = header_value(s, "Location")) != NULL) {
             ar_strlcpy(resp->location, v, sizeof(resp->location));
+        } else if ((v = header_value(s, "Retry-After")) != NULL) {
+            ar_strlcpy(retry_header,v,sizeof(retry_header));
         } else if ((v = header_value(s, "Date")) != NULL) {
             resp->date_ms = http_date_to_ms(v);
             if (resp->date_ms)
@@ -356,6 +395,9 @@ static int attempt(HttpClient *c, const char *method, const char *path, const ch
         }
     }
 
+    resp->retry_after=traffic_retry_after(retry_header,resp->date_ms?resp->date_ms:c->wall_clock?c->wall_clock(c->scheduler_ctx):c->last_date_ms);
+    c->stream_body=c->body_write && resp->status==200 && !strstr(resp->content_type,"text/html");
+    if(c->body_write && !c->stream_body && c->max_body>65536)c->max_body=65536;
     c->total=clen>0?(size_t)clen:0;
     if(report_progress(c)<0) goto out;
 
@@ -395,14 +437,16 @@ int http_request(HttpClient *c, const char *method, const char *path,
 {
     int retry, rc;
 
-    c->err[0] = 0; c->received=c->total=0; c->cancelled=0;
+    c->err[0] = 0; c->received=c->total=0; c->cancelled=c->upload_done=c->deferred=0; c->sent=0;
     if(report_progress(c)<0) return -1;
     rc = attempt(c, method, path, extra_headers, body, body_len, resp, &retry);
-    if (rc < 0 && retry && !c->cancelled &&
+    if (rc < 0 && retry && !c->cancelled && !(c->body_write && c->body_received) &&
         (!strcmp(method,"GET") || !strcmp(method,"HEAD"))) {
         http_response_free(resp);
         http_response_init(resp);
         rc = attempt(c, method, path, extra_headers, body, body_len, resp, &retry);
     }
+    if(c->connected && c->tr.interrupt)c->tr.interrupt(c->tr.ctx,NULL,NULL);
+    if(!c->deferred && !c->cancelled && c->after_request) c->after_request(c->scheduler_ctx,rc==0?resp->status:0,resp->retry_after);
     return rc;
 }

@@ -3,6 +3,10 @@
 import json
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+PREFS_FILES={'AmiRocketPrefs','AmiRocketPrefs.info'}
+APP_FILES={'AmiRocket','AmiRocket.info'}
+HELP_FILES={'AmiRocket.guide','AmiRocket.guide.info'}
+INSTALLER_FILES={'Install','Install.info','scripts/Install-AmiRocket'}
 def render(qa=False,uninstall=False,remove_settings=False):
     inventory=json.loads((ROOT/'installer/runtime.json').read_text())
     names=sorted(inventory)
@@ -14,49 +18,118 @@ def render(qa=False,uninstall=False,remove_settings=False):
         lines+=['(user 0)','(set #dest "RAM:AmiRocketInstallerQA/AmiRocket")',f'(set #action {1 if uninstall else 0})',f'(set #remove-settings {1 if uninstall and remove_settings else 0})',
                 '(set #prefs "RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")','(set #legacy-prefs "RAM:AmiRocketInstallerQA/settings/volatile.prefs")']
     else:
-        lines+=['(welcome "Install AmiRocket, or choose Update / Uninstall for an existing installation.")',
-          '(user 1)',
-          '(set #parent (askdir (prompt "Choose the parent drawer containing AmiRocket") (help "AmiRocket and AmiRocketPrefs stay together in one drawer. Existing installations offer Update or Uninstall.") (default "SYS:Utilities")))',
-          '(set #dest (tackon #parent "AmiRocket"))','(set #action 0)','(set #remove-settings 0)',
-          '(set #prefs "ENVARC:AmiRocket.prefs")','(set #legacy-prefs "ENV:AmiRocket.prefs")',
-          '(if (= (exists (tackon #dest "AmiRocket") (noreq)) 1) (set #action (askchoice (prompt "AmiRocket is already installed. Choose an action.") (help "Update preserves settings, custom icons and unrelated plugins. Uninstall lets you keep or remove shared settings.") (choices "Update AmiRocket" "Uninstall AmiRocket") (default 0))))',
-          '(user 0)']
-    lines+=['(if (= #action 0) (', '(if (= (exists #dest (noreq)) 0) (makedir #dest))']
-    for directory in sorted({str(Path(n).parent) for n in names if str(Path(n).parent)!='.'}):
-        lines.append('(if (= (exists (tackon #dest "'+directory+'") (noreq)) 0) (makedir (tackon #dest "'+directory+'")))')
-    for n in names:
+        lines+=['(welcome "Install AmiRocket, or choose Update / Uninstall for an existing installation.")', '(set #novice (= @user-level 0))', '(set #expert (= @user-level 2))', '(if (<> (run (cat "\\"" #helper "\\" DETECT")) 0) (abort "Could not determine the installed location. Settings were left unchanged."))', '(set #dest (getenv "AmiRocket-InstallDir"))', '(set #installed (<> #dest ""))', '(if (= #dest "") (set #dest "SYS:Utilities"))', '(set #action 0)', '(set #remove-settings 0)', '(set #prefs (getenv "AmiRocket-ConfigFile"))', '(if (= #prefs "") (set #prefs "ENVARC:AmiRocket.prefs"))', '(set #legacy-prefs "ENV:AmiRocket.prefs")', '(if #installed ((user 1) (set #action (askchoice (prompt (cat "AmiRocket is already installed in " #dest ". Choose an action.")) (help "Update preserves settings, custom icons and unrelated plugins. Uninstall lets you keep or remove shared settings.") (choices "Update AmiRocket" "Uninstall AmiRocket") (default 0)))))', '(user 0)']
+    if not qa:
+        lines+=['(if (= #novice 0) (user 1))','(if (= #action 0) (set #dest (if #novice #dest (askdir (prompt "Choose the AmiRocket application drawer") (help "The default is SYS:Utilities. Intermediate and Expert modes can choose another drawer.") (default #dest)))))']
+    if qa:
+        lines+=['(set #prefsdest "RAM:AmiRocketInstallerQA/Prefs")']
+    else:
+        lines+=['(set #prefsdest (getenv "AmiRocket-PrefsDir"))',
+            '(if (= #prefsdest "") (set #prefsdest "SYS:Prefs"))',
+            '(if (= #action 0) (set #prefsdest (if #novice #prefsdest (askdir (prompt "Choose the AmiRocketPrefs drawer") (help "The default is SYS:Prefs.") (default #prefsdest)))))']
+    if not qa:
+        lines+=['(set #configdir (getenv "AmiRocket-ConfigDir"))',
+            '(if (= #configdir "") (set #configdir "ENVARC:"))',
+            '(if (and #expert (= #action 0)) ((set #configdir (askdir (prompt "Choose the AmiRocket configuration drawer") (help "All client, Preferences and plugin settings stay in one AmiRocket.prefs file. Existing settings are moved only after the new file is saved.") (default #configdir))) (set #prefs (tackon #configdir "AmiRocket.prefs"))))']
+    lines += ['(set #datadest "RAM:AmiRocketInstallerQA/Data")'] if qa else [
+        '(set #datadest (getenv "AmiRocket-DataDir"))',
+        '(if (= #datadest "") (set #datadest "SYS:AmiRocket"))',
+        '(if (and #expert (= #action 0)) (set #datadest (askstring (prompt "Choose the AmiRocket shared-data drawer") (help "Plugins, sounds and supporting files live here. Use a dedicated drawer, separate from the application, Preferences and installer package. The default is SYS:AmiRocket.") (default #datadest))))',
+        '(if (= #action 0) (if (<> (run (cat "\\\"" #helper "\\\" \\\"" #datadest "\\\" DATA-CHECK \\\"" #dest "\\\" \\\"" #prefsdest "\\\"")) 0) (abort "Choose a dedicated shared-data drawer outside the application, Preferences and installer package.")))']
+    if not qa:
+        lines += ['(set #cachedest (getenv "AmiRocket-CacheDir"))', '(if (or (= #cachedest "") (= #cachedest "PROGDIR:Cache")) (set #cachedest (tackon #datadest "Cache")))',
+            '(set #downloaddir (getenv "AmiRocket-DownloadDir"))', '(if (= #downloaddir "") (set #downloaddir "SYS:Downloads"))',
+            '(if (= #action 0) ((user 1) (if (= #novice 0) (set #cachedest (askstring (prompt "Choose the thumbnail and avatar cache drawer") (help "Cached media can be recreated; this is separate from your configuration file.") (default #cachedest)))) (set #downloaddir (askstring (prompt "Choose the default attachment download drawer") (help "All installation modes can change this path or accept SYS:Downloads. Each download can still be saved elsewhere.") (default #downloaddir))) (user 0)))']
+    if not qa:
+        lines += ['(if (= #action 0) (if (<> (run (cat "\\\"" #helper "\\\" \\\"" #cachedest "\\\" DIRECTORIES-CHECK \\\"" #downloaddir "\\\"")) 0) (abort "Invalid cache or download path. Use a full Amiga drawer path such as SYS:Downloads.")))']
+    installed=[n for n in names if n not in INSTALLER_FILES]
+    lines.append('(set #helpdest "RAM:AmiRocketInstallerQA/Help")' if qa else '(set #helpdest "HELP:")')
+    lines+=['(if (= #action 0) (', '(if (= (exists #dest (noreq)) 0) (makedir #dest))',
+        '(if (= (exists #prefsdest (noreq)) 0) (makedir #prefsdest))',
+        '(if (= (exists (tackon #prefsdest "AmiRocketPrefs.info") (noreq)) 0) (if (= (exists (tackon #dest "AmiRocketPrefs.info") (noreq)) 1) (copyfiles (source (tackon #dest "AmiRocketPrefs.info")) (dest #prefsdest) (nogauge))))']
+    lines.append('(if (= (exists #datadest (noreq)) 0) (makedir #datadest))')
+    lines.append('(if (= (exists #helpdest (noreq)) 0) (makedir #helpdest))')
+    for directory in sorted({str(Path(n).parent) for n in installed if str(Path(n).parent)!='.'}):
+        lines.append('(if (= (exists (tackon #datadest "'+directory+'") (noreq)) 0) (makedir (tackon #datadest "'+directory+'")))')
+    for n in installed:
         target=str(Path(n).parent)
-        body='(copyfiles (source "'+n+'") (dest '+('#dest' if target=='.' else '(tackon #dest "'+target+'")')+') (help "Copy verified release files") (nogauge))'
-        if n.endswith('.info'):body='(if (= (exists (tackon #dest "'+n+'") (noreq)) 0) '+body+')'
+        dest='#helpdest' if n in HELP_FILES else '#prefsdest' if n in PREFS_FILES else '#dest' if n in APP_FILES else '#datadest' if target=='.' else '(tackon #datadest "'+target+'")'
+        body='(copyfiles (source "'+n+'") (dest '+dest+') (help "Copy verified release files") (nogauge))'
+        if n.endswith('.info'):
+            parent='#helpdest' if n in HELP_FILES else '#prefsdest' if n in PREFS_FILES else '#dest' if n in APP_FILES else '#datadest'
+            body='(if (= (exists (tackon '+parent+' "'+n+'") (noreq)) 0) '+body+')'
         lines.append(body)
-    lines+=['(if (<> (run (cat "\\"" #helper "\\" \\"" #dest "\\" ICONS")) 0) (abort "Files installed; could not create missing icons."))', ') (', '(if (= (exists (tackon #dest "AmiRocket") (noreq)) 0) (abort "This is not an AmiRocket installation. Nothing removed."))']
+    lines+=['(if (<> (run (cat "\\"" #helper "\\" \\"" #dest "\\" ICONS \\"" #prefsdest "\\"")) 0) (abort "Files installed; could not create missing icons."))', ') (', '(if (= (exists (tackon #dest "AmiRocket") (noreq)) 0) (abort "This is not an AmiRocket installation. Nothing removed."))']
+    if not qa:
+        lines.insert(len(lines)-2,'(if (= (exists #configdir (noreq)) 0) (makedir #configdir))')
+        command='(if (<> (run (cat "\\\"" #helper "\\\" \\\"" #prefs "\\\" CONFIG")) 0) (abort "Configuration could not be moved; existing settings retained. Choose an empty configuration drawer."))'
+        lines.insert(len(lines)-2,command)
+    if not qa:
+        lines.insert(len(lines)-2,'(if (= (exists #cachedest (noreq)) 0) (makedir #cachedest))')
+        lines.insert(len(lines)-2,'(if (= (exists #downloaddir (noreq)) 0) (makedir #downloaddir))')
+        lines.insert(len(lines)-2,'(if (<> (run (cat "\\\"" #helper "\\\" \\\"" #cachedest "\\\" DIRECTORIES \\\"" #downloaddir "\\\"")) 0) (abort "Could not save cache and download locations."))')
+    if not qa:
+        lines.insert(len(lines)-2,'(if (<> (run (cat "\\\"" #helper "\\\" \\\"" #datadest "\\\" DATA \\\"" #dest "\\\" \\\"" #prefsdest "\\\"")) 0) (abort "Could not migrate shared data. Existing files and settings were kept."))')
+    if not qa:
+        for n in installed:
+            if n not in APP_FILES | PREFS_FILES | HELP_FILES:
+                lines.insert(len(lines)-2,'(if (= (exists (tackon #dest "'+n+'") (noreq)) 1) (delete (tackon #dest "'+n+'")))')
+    lines.insert(len(lines)-2,'(if (<> (run (cat "\\\"" #helper "\\\" \\\"" #dest "\\\" CLEAN-LEGACY \\\"" #prefsdest "\\\"")) 0) (abort "Could not retire legacy installer files."))')
+    if not qa:
+        lines.insert(len(lines)-2, '(if (<> (run (cat "\\"" #helper "\\" \\"" #dest "\\" RECORD \\"" #prefsdest "\\"")) 0) (abort "Files installed; could not save the install location in the shared preferences."))')
     if not qa:
         lines+=['(user 1)',
-          '(set #remove-settings (askchoice (prompt "Keep or remove AmiRocket settings?") (help "Keep settings preserves server accounts, saved tokens, appearance and plugin options. Remove settings deletes the shared ENVARC:AmiRocket.prefs file and old ENV fallback, affecting all AmiRocket installations. Custom plugins and unrelated files are kept.") (choices "Keep settings" "Remove settings") (default 0)))',
+          '(set #remove-settings (askchoice (prompt "Keep or remove AmiRocket settings?") (help "Keep settings preserves server accounts, saved tokens, appearance and plugin options. Remove settings deletes the selected shared configuration file and old ENV fallback, affecting all AmiRocket installations. Custom plugins and unrelated files are kept.") (choices "Keep settings" "Remove settings") (default 0)))',
           '(set #summary "Remove AmiRocket? Settings, custom plugins and unrelated files will be kept.")',
           '(if (= #remove-settings 1) (set #summary "Remove AmiRocket and all shared account, token and plugin settings? Custom plugins and unrelated files will be kept."))',
           '(if (= (askbool (prompt #summary) (help "Cancel leaves this installation and its settings unchanged.") (choices "Remove" "Cancel") (default 0)) 0) (exit "Nothing removed" (quiet)))',
           '(user 0)']
     lines+=['(if (<> (run (cat "\\\"" #helper "\\\" \\\"" #dest "\\\" REMOVE-STARTUP")) 0) (abort "Could not remove the owned startup entry."))'] if not qa else []
+    for n in sorted(PREFS_FILES):
+        lines.append('(if (= (exists (tackon #prefsdest "'+n+'") (noreq)) 1) (delete (tackon #prefsdest "'+n+'")))')
+    for n in sorted(HELP_FILES):
+        lines.append('(if (= (exists (tackon #helpdest "'+n+'") (noreq)) 1) (delete (tackon #helpdest "'+n+'")))')
     for n in names:
+        if n not in APP_FILES | PREFS_FILES | HELP_FILES | INSTALLER_FILES:
+            lines.append('(if (= (exists (tackon #datadest "'+n+'") (noreq)) 1) (delete (tackon #datadest "'+n+'")))')
         lines.append('(if (= (exists (tackon #dest "'+n+'") (noreq)) 1) (delete (tackon #dest "'+n+'")))')
     lines+=['(if (= #remove-settings 1) (',
       '(if (= (exists #prefs (noreq)) 1) (delete #prefs))',
       '(if (= (exists #legacy-prefs (noreq)) 1) (delete #legacy-prefs))',
+      *([] if qa else ['(if (= (exists "ENV:AmiRocket-ConfigFile" (noreq)) 1) (delete "ENV:AmiRocket-ConfigFile"))','(if (= (exists "ENVARC:AmiRocket-ConfigFile" (noreq)) 1) (delete "ENVARC:AmiRocket-ConfigFile"))']),
       '))', '))',
       '(if (= #remove-settings 1) (exit "AmiRocket removed. Shared settings removed." (quiet)) (exit "AmiRocket operation completed. Settings preserved." (quiet)))']
+    if not qa:
+        lines[-1:] = [
+            '(complete 100)',
+            '(if (= #action 0) ((user 1)',
+            '(message "AmiRocket installed successfully.\\n\\nClient: " (tackon #dest "AmiRocket") "\\nShared data: " #datadest "\\nGuide: " (tackon #helpdest "AmiRocket.guide") "\\nPreferences: " (tackon #prefsdest "AmiRocketPrefs") "\\nConfiguration: " #prefs "\\nCache: " #cachedest "\\nDownloads: " #downloaddir)',
+            '(if (askbool (prompt "Installation complete. Finish or start AmiRocket?") (help "Finish closes the installer. Finish and start opens AmiRocket once, without a startup entry.") (choices "Finish and start AmiRocket" "Finish") (default 0))',
+            ' (if (<> (run (cat "\\\"" #helper "\\\" \\\"" #dest "\\\" START")) 0) (message "AmiRocket could not be started. Open it manually from its application drawer.")))',
+            '(exit (quiet)))',
+            '  (if (= #remove-settings 1) (exit "AmiRocket removed. Shared settings removed.") (exit "AmiRocket removed. Settings preserved.")))']
     return '\n'.join(lines)+'\n'
 def shell():
     names=sorted(json.loads((ROOT/'installer/runtime.json').read_text()))
-    lines=['.key DEST/A','.bra {','.ket }','; Install into the full destination drawer; settings are never copied.',
-           'FailAt 10','"CreateIcons" CHECK','If WARN',' Echo "Close AmiRocket before installation."',' Quit 10','EndIf',
-           'FailAt 5','If NOT EXISTS "{DEST}"',' MakeDir "{DEST}"','EndIf']
-    for directory in sorted({str(Path(n).parent) for n in names if str(Path(n).parent)!='.'}):lines+=['If NOT EXISTS "{DEST}/'+directory+'"',' MakeDir "{DEST}/'+directory+'"','EndIf']
-    for n in names:
-        cmd='Copy "'+n+'" TO "{DEST}/'+n+'" CLONE'
-        if n.endswith('.info'):lines+=['If NOT EXISTS "{DEST}/'+n+'"', ' '+cmd,'EndIf']
+    installed=[n for n in names if n not in INSTALLER_FILES]
+    lines=['.key DEST/A,PREFS,CONFIG,DATA','.def PREFS "SYS:Prefs"','.def DATA "SYS:AmiRocket"','.bra {','.ket }',
+        '; Application files go into DEST; the Preferences executable goes into PREFS.',
+        'FailAt 10','"CreateIcons" CHECK','If WARN',' Echo "Close AmiRocket before installation."',' Quit 10','EndIf',
+        'FailAt 5','If NOT EXISTS "{DEST}"',' MakeDir "{DEST}"','EndIf',
+        'If NOT EXISTS "{PREFS}"',' MakeDir "{PREFS}"','EndIf']
+    lines+=['If NOT EXISTS "{DATA}"',' MakeDir "{DATA}"','EndIf','"CreateIcons" "{DATA}" DATA-CHECK "{DEST}" "{PREFS}"']
+    for directory in sorted({str(Path(n).parent) for n in installed if str(Path(n).parent)!='.'}):
+        lines+=['If NOT EXISTS "{DATA}/'+directory+'"',' MakeDir "{DATA}/'+directory+'"','EndIf']
+    lines+=['If NOT EXISTS "{PREFS}/AmiRocketPrefs.info"',' If EXISTS "{DEST}/AmiRocketPrefs.info"',
+        '  Copy "{DEST}/AmiRocketPrefs.info" TO "{PREFS}/AmiRocketPrefs.info" CLONE',' EndIf','EndIf']
+    for n in installed:
+        target=('HELP:' if n in HELP_FILES else ('{PREFS}' if n in PREFS_FILES else '{DEST}' if n in APP_FILES else '{DATA}')+'/')+n
+        cmd='Copy "'+n+'" TO "'+target+'" CLONE'
+        if n.endswith('.info'):lines+=['If NOT EXISTS "'+target+'"',' '+cmd,'EndIf']
         else:lines.append(cmd)
-    lines+=['"CreateIcons" "{DEST}" ICONS','Echo "AmiRocket installed. Settings preserved."']
+    lines+=['"CreateIcons" "{CONFIG}" CONFIG','"CreateIcons" "{DEST}" ICONS "{PREFS}"','"CreateIcons" "{DATA}" DATA "{DEST}" "{PREFS}"','"CreateIcons" "{DEST}" RECORD "{PREFS}"']
+    for n in sorted(INSTALLER_FILES):lines+=['If EXISTS "{DEST}/'+n+'"',' Delete "{DEST}/'+n+'"','EndIf']
+    lines+=['"CreateIcons" "{DEST}" CLEAN-LEGACY "{PREFS}"','Echo "AmiRocket installed. Settings preserved."']
     return '\n'.join(lines)+'\n'
 if __name__=='__main__':
     (ROOT/'installer/Install').write_text(render(),encoding='ascii')

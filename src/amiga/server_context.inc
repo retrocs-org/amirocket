@@ -19,7 +19,7 @@ static void server_state_free(ServerState *s)
     ar_free(s->members); ar_free(s->presence); ar_free(s->draft);
     memset(s,0,sizeof(*s)); s->generation=generation; s->expanded=1;
 }
-#define SERVER_SCALARS(X) X(connected) X(busy) X(history_pending) X(history_exhausted) X(send_pending) X(room_serial) X(download_pending) X(tz_ms) X(tz_known) X(anchor_line) X(read_boundary) X(boundary_unread)
+#define SERVER_SCALARS(X) X(connected) X(busy) X(history_pending) X(history_exhausted) X(send_pending) X(room_serial) X(download_pending) X(tz_ms) X(tz_known) X(anchor_line) X(status_until) X(read_boundary) X(boundary_unread)
 #define SERVER_ARRAYS(X) X(cur_rid) X(loading_rid) X(topic) X(username) X(host) X(anchor_id) X(presence_user_id) X(status) X(unread_anchor) X(marker_room)
 static void server_notice(int slot,const char *text)
 {
@@ -44,15 +44,34 @@ static void server_event(int slot,int error,const char *text)
     s=&G.servers[slot];
     if(s->last_error==error && !strcmp(s->connection_text,text)) return;
     s->last_error=error;
-    if(!error) s->reconnecting=0;
+    if(!error) { s->reconnecting=s->cooling=s->health_retry=0; s->retry_until=0; }
     ar_strlcpy(s->connection_text,text,sizeof(s->connection_text));
     { char id[16],code[24]; snprintf(id,sizeof(id),"%d",slot+1); snprintf(code,sizeof(code),"%d",error);
       application_event("SERVERSTATUS",id,code,text); }
     server_notice(slot,text);
 }
+static const char *server_health(int slot,char *out,int size)
+{
+    ServerState *s=&G.servers[slot]; int connected=slot==G.active_server?G.connected:s->connected;
+    long seconds=(long)((s->retry_until-amiga_local_ms()+999)/1000);
+    if(!connected && !(slot==G.active_server?G.busy:s->busy) && !s->reconnecting) snprintf(out,size,"Offline");
+    else if(s->cooling && seconds>0) snprintf(out,size,"Cooling down - retry in %lds",seconds);
+    else if((s->health_retry || s->reconnecting) && seconds>0) snprintf(out,size,"Reconnecting - retry in %lds",seconds);
+    else if(s->health_retry || s->reconnecting) snprintf(out,size,"Reconnecting - retry due");
+    else snprintf(out,size,"%s",connected?"Connected":(slot==G.active_server?G.busy:s->busy)?"Connecting":"Offline");
+    return out;
+}
+static void health_status(int slot,const NetMsg *m)
+{
+    ServerState *s=&G.servers[slot];
+    if(m->a_interval>0) { s->cooling=s->health_retry=1; s->retry_until=amiga_local_ms()+(ar_ms)m->a_interval*1000; }
+    if(m->rc==RC_OK || m->rc==RC_ERR_AUTH) { s->cooling=s->health_retry=0; s->retry_until=0; }
+}
 static int server_stash(void)
 {
     ServerState *s=&G.servers[G.active_server]; STRPTR text=NULL; char *draft;
+    if(!draft_checkpoint()) { request("Draft kept","Copy, shorten or clear this draft before switching servers."); return 0; }
+    G.draft_key[0]=G.draft_last[0]=0;
     server_legacy_save();
     if((G.win || G.iconified) && G.g[G_INPUT]) {
         composer_capture();
@@ -83,7 +102,7 @@ static void server_load(int slot)
     G.members=s->members; s->members=NULL; G.presence=s->presence; s->presence=NULL;
     G.chat.top=s->chat_top; G.chat.follow=s->chat_follow;
     if((G.win || G.iconified) && G.g[G_INPUT]) composer_set(s->draft?s->draft:"",s->cursor);
-    ar_free(s->draft); s->draft=NULL;
+    ar_free(s->draft); s->draft=NULL; draft_bind(G.cur_rid);
     if(!G.status[0]) ar_strlcpy(G.status,"Disconnected - choose Project / Connect",sizeof(G.status));
     G.copy_chat=0; G.n_sugg=0; G.last_unread=-1; G.server_view=1;
 }
@@ -171,7 +190,7 @@ static int server_background(NetMsg *m)
         if(m->rc==RC_OK && !strcmp(s->cur_rid,m->rid)) { s->history_exhausted=m->msgs.count<50; rc_msglist_merge(&s->msgs,&m->msgs,MAX_MESSAGES); }
         break;
     case NC_SEND:
-        s->send_pending=0;
+        s->send_pending=0; if(m->rc==RC_OK)send_record_done(slot,m); if(m->rc==RC_OK) draft_sent(slot,m->rid,m->a_text);
         if(m->rc==RC_OK) {
             Buf utf8; buf_init(&utf8); latin1_to_utf8(&utf8,s->draft?s->draft:"");
             if(m->a_text && !strcmp(s->cur_rid,m->rid) && !strcmp(ar_trim(utf8.data?utf8.data:(char *)""),m->a_text)) { ar_free(s->draft); s->draft=NULL; s->cursor=0; }
@@ -200,7 +219,7 @@ static int server_background(NetMsg *m)
         server_event(slot,0,m->kind==NC_LOGOUT?"Logged out":"Disconnected");
         s->connected=s->busy=0; rc_roomlist_free(&s->rooms); rc_msglist_free(&s->msgs); s->cur_rid[0]=0; break;
     case NE_STATUS:
-        server_event(slot,m->rc,m->text); s->reconnecting=m->a_interval>0;
+        server_event(slot,m->rc,m->text); s->reconnecting=m->a_interval>0; health_status(slot,m);
         ar_strlcpy(s->status,m->text,sizeof(s->status));
         if(m->rc==RC_ERR_AUTH) { s->connected=0; s->reconnecting=0; p->token[0]=p->user_id[0]=0; prefs_save_client_state(); }
         break;

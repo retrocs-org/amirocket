@@ -22,6 +22,8 @@
 #include "../core/emoji.h"
 #include "worker.h"
 #include "../core/charset.h"
+#include "../core/drafts.h"
+#include <devices/timer.h>
 #include "../core/mdtext.h"
 #include "../core/mem.h"
 #include "../core/timeutil.h"
@@ -46,6 +48,9 @@
 
 #include <classes/window.h>
 #include <gadgets/layout.h>
+#include <gadgets/fuelgauge.h>
+#include <datatypes/soundclass.h>
+#include <proto/fuelgauge.h>
 #include <gadgets/button.h>
 #include <gadgets/string.h>
 #include <gadgets/texteditor.h>
@@ -94,23 +99,24 @@ struct GfxBase *GfxBase;
 struct Library *GadToolsBase;
 struct Library *UtilityBase;
 struct LocaleBase *LocaleBase;
+struct Library *FuelGaugeBase;
 struct Library *WindowBase, *LayoutBase, *ButtonBase, *StringBase;
 struct Library *IconBase;
 struct Library *AslBase, *DiskfontBase, *TextFieldBase, *DataTypesBase;
 struct Library *ListBrowserBase, *CheckBoxBase, *LabelBase, *SpaceBase, *ScrollerBase;
 
-#define MAX_MESSAGES 1000
+#define MAX_MESSAGES memory_message_limit()
 #define INPUT_MAX    4000
 #define MAX_SUGG     8
 
 enum {
     G_ROOMS = 1, G_MSGS, G_INPUT, G_SEND, G_STATUS, G_ROOMHDR, G_SIDESCROLL, G_CHATSCROLL, G_FILTER, G_COMPOSELABEL,
     L_SERVER, L_USER, L_PASS, L_CODE, L_VERIFY, L_REMEMBER, L_CONNECT, L_CANCEL,
-    G_NEW, G_PREFSB, G_EMOJI, G_BOLD, G_ITALIC, G_STRIKE, G_INLINECODE, G_CODEBLOCK, G_LINK, G_CONNECTB,
+    G_NEW, G_PREFSB, G_EMOJI, G_BOLD, G_ITALIC, G_STRIKE, G_INLINECODE, G_CODEBLOCK, G_LINK, G_CONNECTB, G_UPLOAD, G_SEARCH, G_FIRSTUNREAD, G_RETRYSEND,
     G_COUNT
 };
 
-enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH, M_OWNSCREEN, M_FONT, M_SCREENFONT, M_PREVIEW, M_OLDER, M_SEND, M_COMPLETE, M_NEXTSUGG, M_PREVSUGG, M_COPY, M_CUT, M_PASTE, M_COPYMSG, M_PREFS, M_NEWDM, M_NEWCHANNEL, M_NEWPRIVATE, M_SAVEFILE, M_CLEARIMAGES, M_ICONIFY, M_NEXTUNREAD, M_JUMPUNREAD, M_THEME_BASE = 100, M_PLUGIN_BASE = 200 };
+enum { M_CONNECT = 1, M_DISCONNECT, M_LOGOUT, M_ABOUT, M_QUIT, M_REFRESH, M_OWNSCREEN, M_FONT, M_SCREENFONT, M_PREVIEW, M_OLDER, M_SEND, M_COMPLETE, M_NEXTSUGG, M_PREVSUGG, M_COPY, M_CUT, M_PASTE, M_COPYMSG, M_PREFS, M_NEWDM, M_NEWCHANNEL, M_NEWPRIVATE, M_SAVEFILE, M_CLEARIMAGES, M_ICONIFY, M_NEXTUNREAD, M_JUMPUNREAD, M_SEARCH, M_UPLOAD, M_CLEARCACHE, M_MESSAGE, M_OPENIMAGE, M_CLEAREXTERNAL, M_RETRYSEND, M_SWITCHNEXT, M_SWITCHPREV, M_QUICKROOM, M_FORGETSEND, M_THEME_BASE = 100, M_PLUGIN_BASE = 200 };
 
 static struct NewMenu g_newmenu[] = {
     { NM_TITLE, (STRPTR)"Project", NULL, 0, 0, NULL },
@@ -127,12 +133,22 @@ static struct NewMenu g_newmenu[] = {
     { NM_ITEM, (STRPTR)"New direct / group message...", (STRPTR)"N", 0, 0, (APTR)M_NEWDM },
     { NM_ITEM, (STRPTR)"New public channel...", NULL, 0, 0, (APTR)M_NEWCHANNEL },
     { NM_ITEM, (STRPTR)"New private channel...", NULL, 0, 0, (APTR)M_NEWPRIVATE },
+    { NM_ITEM, (STRPTR)"Search this conversation...", (STRPTR)"F", 0, 0, (APTR)M_SEARCH },
+    { NM_ITEM, (STRPTR)"Upload attachment...", NULL, 0, 0, (APTR)M_UPLOAD },
+    { NM_ITEM, (STRPTR)"Clear media caches", NULL, 0, 0, (APTR)M_CLEARCACHE },
     { NM_ITEM, (STRPTR)"Clear image previews", NULL, 0, 0, (APTR)M_CLEARIMAGES },
+    { NM_ITEM, (STRPTR)"Open selected image externally", NULL, 0, 0, (APTR)M_OPENIMAGE },
+    { NM_ITEM, (STRPTR)"Clear temporary image files...", NULL, 0, 0, (APTR)M_CLEAREXTERNAL },
     { NM_ITEM, (STRPTR)"Save selected attachment...", NULL, 0, 0, (APTR)M_SAVEFILE },
     { NM_ITEM, (STRPTR)"Next unread room", (STRPTR)"U", 0, 0, (APTR)M_NEXTUNREAD },
     { NM_ITEM, (STRPTR)"Jump to new messages", (STRPTR)"L", 0, 0, (APTR)M_JUMPUNREAD },
     { NM_ITEM, (STRPTR)"Check for new messages", (STRPTR)"R", 0, 0, (APTR)M_REFRESH },
     { NM_ITEM, (STRPTR)"Load older messages", (STRPTR)"O", 0, 0, (APTR)M_OLDER },
+    { NM_ITEM, (STRPTR)"Retry failed send...", NULL, 0, 0, (APTR)M_RETRYSEND },
+    { NM_ITEM, (STRPTR)"Forget unconfirmed delivery...", NULL, 0, 0, (APTR)M_FORGETSEND },
+    { NM_ITEM, (STRPTR)"Next conversation", NULL, 0, 0, (APTR)M_SWITCHNEXT },
+    { NM_ITEM, (STRPTR)"Previous conversation", NULL, 0, 0, (APTR)M_SWITCHPREV },
+    { NM_ITEM, (STRPTR)"Find conversation (Ctrl+K)", NULL, 0, 0, (APTR)M_QUICKROOM },
     { NM_ITEM, (STRPTR)"Send message", (STRPTR)"S", 0, 0, (APTR)M_SEND },
     { NM_ITEM, (STRPTR)"Insert suggested name / emoji", (STRPTR)"I", 0, 0, (APTR)M_COMPLETE },
     { NM_ITEM, (STRPTR)"Next suggestion", (STRPTR)"J", 0, 0, (APTR)M_NEXTSUGG },
@@ -141,6 +157,7 @@ static struct NewMenu g_newmenu[] = {
     { NM_ITEM, (STRPTR)"Copy", (STRPTR)"C", 0, 0, (APTR)M_COPY },
     { NM_ITEM, (STRPTR)"Cut", (STRPTR)"X", 0, 0, (APTR)M_CUT },
     { NM_ITEM, (STRPTR)"Paste", (STRPTR)"V", 0, 0, (APTR)M_PASTE },
+    { NM_ITEM, (STRPTR)"Message / thread actions...", (STRPTR)"T", 0, 0, (APTR)M_MESSAGE },
     { NM_ITEM, (STRPTR)"Copy selected message", (STRPTR)"B", 0, 0, (APTR)M_COPYMSG },
     { NM_END, NULL, NULL, 0, 0, NULL }
 };
@@ -160,6 +177,7 @@ typedef struct {
     ar_ms tz_ms; int tz_known,anchor_line,chat_top,chat_follow,cursor;
     char dock_snapshot[256];
     RcMsgList events; int event_serial,last_error; char connection_text[256];
+    ar_ms retry_until,status_until; int cooling,health_retry;
     int generation,collapsed[SEC_N],expanded,reconnecting;
 } ServerState;
 
@@ -190,11 +208,11 @@ typedef struct {
     struct IClass *editor_class;
     volatile int editor_action;
     struct TextFont *chat_font, *code_font;
-    char filter[96], compose_label[200];
+    char filter[96], compose_label[200];ar_ms status_until;
     struct { char user[96]; Buf bytes; Object *picture; int attempted, failed, size; struct BitMap *bitmap; char path[96]; } avatars[64];
     int avatar_count, avatar_pending, avatar_generation;
-    struct { char *url; Buf bytes; Object *picture; struct BitMap *bitmap; int width, height, expanded, loading; char path[96]; } images[8];
-    int image_generation;
+    struct { char *url; Buf bytes; Object *picture; struct BitMap *bitmap; int width, height, expanded, loading, failed; unsigned long touched; char path[512]; } images[8];
+    int image_generation; unsigned long image_clock;
     int prefs_only, running_client, session_override, plugins_dirty, panel_depth, defer_display, last_unread;
     PrefsEndpoint *prefs_service;
     char *presence;
@@ -202,10 +220,12 @@ typedef struct {
     STRPTR reopen_draft;
     int composer_overlong;
     char anchor_id[64];
-    int anchor_line, history_pending, history_exhausted, send_pending, room_serial;
+    int anchor_line, history_pending, history_exhausted, send_pending, room_serial, unread_seek;
     char unread_anchor[96],marker_room[64]; ar_ms read_boundary; int boundary_unread;
     int download_pending;
-    Object *transfer_text; struct Window *transfer_win;
+    Object *notification_sound;char notification_sound_path[256];ar_ms notification_sound_at;
+    Object *transfer_text,*transfer_gauge; struct Window *transfer_win;
+    ar_ms transfer_started;
     ULONG transfer_serial; int transfer_dialog,transfer_rc,transfer_cancelled,transfer_save_offer; char transfer_status[256],transfer_progress_text[256];
     volatile int filter_changed;
     volatile int input_changed;   /* set by the string edit hook */
@@ -238,10 +258,17 @@ typedef struct {
     char cur_rid[64];
     char copy_id[96], copy_rid[64];
     int copy_chat, copy_file;
+    struct { char *url; char path[512],drawer[384]; int slot,generation; } external_images[4];
+    ULONG external_serial; int external_pending;
+    int action_active,action_busy,action_slot,action_generation,action_serial,action_offset,action_total,action_menu_pending;
+    char action_room[64],action_id[96],action_thread[96],action_user[96],action_me[96],action_caption[128];
+    Object *action_list,*action_preview,*action_editor,*action_info,*action_edit,*action_delete;
+    struct Window *action_win; struct List action_nodes; RcMsgList action_results;
     char loading_rid[64];
     char username[96];
     char host[256];
     int connected, busy, quit;
+    int inline_reaction_pending;
     int pending;               /* commands awaiting replies */
     ar_ms tz_ms;               /* local time minus UTC */
     int tz_known;
@@ -251,9 +278,32 @@ typedef struct {
     char roomhdr[200];
     int  collapsed[SEC_N];
     char about[512];
+    ArDrafts *drafts; char draft_key[512],draft_last[8001]; int draft_cursor,draft_warned;
+    struct MsgPort *tick_port; struct timerequest *tick; int tick_open,tick_pending;
+    int search_back[64],search_back_count,search_step;
+    int search_active,search_busy,search_slot,search_generation,search_serial,search_offset,search_total,search_selected;
+    char search_room[64],search_query[513],search_caption[128]; RcMsgList search_results; struct List search_nodes;
+    Object *search_list,*search_preview,*search_info; struct Window *search_win;
+
 } Gui;
 
 static Gui G;
+static int memory_message_limit(void) { int n=G.prefs.message_limit; if(n<50 || n>1000) n=1000; return G.prefs.low_memory && n>200?200:n; }
+static size_t memory_image_limit(void) { int n=G.prefs.image_cache_kib; if(n<256 || n>8192) n=8192; if(G.prefs.low_memory && n>512) n=512; return (size_t)n*1024; }
+static int draft_checkpoint(void);
+static void send_state_refresh(void);
+static void send_record_done(int,const NetMsg *);
+static int draft_bind(const char *rid);
+static void draft_start(void);
+static void draft_sent(int slot,const char *rid,const char *text);
+static void draft_stop(void);
+static ULONG client_tick_signal(void);
+static void client_tick_handle(void);
+static void on_search(NetMsg *m);
+static void search_window(void);
+static void upload_attachment(void);
+static void clear_media_caches(void);
+
 
 static void server_legacy_load(int slot)
 {
@@ -272,7 +322,9 @@ static void server_legacy_save(void)
     p->verify=G.prefs.verify; p->remember=G.prefs.remember; G.prefs.servers_defined=1;
 }
 static const char *server_display(int slot);
+static const char *server_health(int slot,char *out,int size);
 static void server_event(int slot,int error,const char *text);
+static void server_notice(int slot,const char *text);
 static void server_context_popup(void);
 static void sidebar_pointer(struct IntuiMessage *im);
 static void server_select(int slot);
@@ -283,6 +335,7 @@ static void dock_room_delta(int slot,const RcRoomList *delta);
 static void tree_rebuild(void);
 static int server_background(NetMsg *m);
 
+static ar_ms amiga_local_ms(void);
 static void mark_dirty(ULONG what);
 static void send_cmd(NetMsg *m);
 
@@ -340,7 +393,7 @@ static int picture_dimensions_ok(const unsigned char *p, size_t n, unsigned long
 static struct BitMap *avatar_get(const char *user, int size)
 {
     int i;
-    if (!DataTypesBase || !user || !*user || strlen(user) >= 96) return NULL;
+    if (G.prefs.low_memory || !DataTypesBase || !user || !*user || strlen(user) >= 96) return NULL;
     for (i = 0; i < G.avatar_count; i++) if (!strcmp(G.avatars[i].user, user) && G.avatars[i].size == size) break;
     if (i == G.avatar_count) {
         if (i == 64) return NULL;
@@ -503,6 +556,7 @@ static int prefs_save_client_state(void)
           snprintf(key,sizeof(key),"workspace.%d.room",i); prefs_set(p,key,i==G.active_server?G.cur_rid:G.servers[i].cur_rid);
       }
       prefs_set(p,"workspace.sidebar",prefs_extra(&G.prefs,"workspace.sidebar","30"));
+      prefs_set(p,"workspace.composer_rows",prefs_extra(&G.prefs,"workspace.composer_rows","4"));
     }
     p->win_left = G.prefs.win_left; p->win_top = G.prefs.win_top; p->win_width = G.prefs.win_width; p->win_height = G.prefs.win_height;
     prefs_service_publish(G.prefs_service,&G.prefs);
@@ -533,7 +587,8 @@ static void request_utf8(const char *title, const char *utf8)
 
 static void set_status(const char *latin1)
 {
-    ar_strlcpy(G.status, latin1, sizeof(G.status));
+    ar_strlcpy(G.status, latin1, sizeof(G.status));G.status_until=amiga_local_ms()+10000;
+    mark_dirty(DIRTY_HEADER);
     if (G.win && G.g[G_STATUS])
         SetGadgetAttrs((struct Gadget *)G.g[G_STATUS], G.win, NULL, GA_Text, (ULONG)G.status, TAG_END);
 }
@@ -607,6 +662,7 @@ static void mark_dirty(ULONG what);
 
 static void update_title(void)
 {
+    send_state_refresh();
     const RcRoom *r = !G.server_view && G.cur_rid[0] ? find_room(G.cur_rid) : NULL;
     Buf b;
 
@@ -760,7 +816,7 @@ static void draw_side(void)
           }
       }
     }
-    G.side.no_avatars = !G.prefs.show_avatars;
+    G.side.no_avatars = !G.prefs.show_avatars || G.prefs.low_memory;
     side_draw(&G.side, G.win->RPort, &box, &G.pens);
     SetFont(G.win->RPort, old_font);
     set_scroller(G_SIDESCROLL, G.side.top, G.side.visible, G.side.n);
@@ -822,7 +878,7 @@ static void draw_suggestions(const struct IBox *box)
         if (G.sugg_kind == 1) {
             int es = view_emoji_size(rp);
             Buf c;
-            if (G.prefs.show_emoji) view_emoji(rp, p, x, y + (rh - es) / 2, G.sugg[i].emoji);
+            if (G.prefs.show_emoji && !G.prefs.low_memory) view_emoji(rp, p, x, y + (rh - es) / 2, G.sugg[i].emoji);
             buf_init(&c);
             buf_printf(&c, ":%s:", G.sugg[i].user);
             SetAPen(rp, i == G.sugg_sel ? p->side_sel_text : p->side_text);
@@ -872,8 +928,10 @@ static void draw_suggestions(const struct IBox *box)
 }
 
 static void load_older(void);
+static void jump_unread(void);
 static void transfer_dialog(NetMsg *m);
 static void download_attachment(int message, int file);
+static void open_external_image(int message,int file);
 static void composer_capture(void);
 static void composer_set(const char *text, int cursor);
 
@@ -907,7 +965,7 @@ static void draw_chat(void)
     if (G.chat_font) SetFont(G.win->RPort, G.chat_font);
     G.chat.unread_id=G.server_view?NULL:G.unread_anchor;
     G.chat.code_font = G.code_font;
-    G.chat.no_emoji = !G.prefs.show_emoji; G.chat.no_avatars = !G.prefs.show_avatars || G.server_view;
+    G.chat.no_emoji = !G.prefs.show_emoji || G.prefs.low_memory; G.chat.no_avatars = !G.prefs.show_avatars || G.prefs.low_memory || G.server_view;
     G.chat.inline_images = G.prefs.inline_images && !G.server_view;
     if(G.server_view) G.chat.nimages=0; else image_view_update();
     if (G.chat_relayout || G.chat.width != box.Width) {
@@ -959,6 +1017,7 @@ static void draw_chat(void)
     if (G.n_sugg)
         draw_suggestions(&box);
     SetFont(G.win->RPort, old_font);
+    images_auto_visible();
 }
 
 static void draw_header(void)
@@ -980,6 +1039,9 @@ static void draw_header(void)
     } else {
         buf_puts(&t, G.connected ? "Select a room" : "AmiRocket");
     }
+    if(G.status_until>amiga_local_ms() && G.status[0]){buf_clear(&tp);buf_puts(&tp,G.status);}
+    if(G.draft_warned) buf_puts(&t," [draft not saved]");
+    { char health[96]; if(tp.len) buf_puts(&tp," | "); buf_puts(&tp,server_health(G.active_server,health,sizeof(health))); }
     header_draw(G.win->RPort, &box, &G.pens, buf_str(&t), buf_str(&tp), r ? r->favorite : 0);
     buf_free(&t);
     buf_free(&tp);
@@ -1050,11 +1112,19 @@ static void editor_wake(void)
 static void editor_char(struct ChangeListener *l, ULONG ch) { editor_wake(); }
 static void editor_change(struct ChangeListener *l, ULONG a, ULONG b, ULONG c, ULONG d) { editor_wake(); }
 
-enum { EDITOR_NONE, EDITOR_INSERT, EDITOR_DISMISS, EDITOR_SEND, EDITOR_NEWLINE };
+enum { EDITOR_NONE, EDITOR_INSERT, EDITOR_DISMISS, EDITOR_SEND, EDITOR_NEWLINE, EDITOR_NEXTROOM, EDITOR_PREVROOM, EDITOR_QUICKROOM, EDITOR_NEXTUNREAD };
+static void switch_conversation(int direction);
+static void quick_conversation(void);
+static void next_unread(void);
 
 static int editor_key(UWORD key, UWORD qualifier)
 {
     int consumed = 0;
+    if((qualifier&IEQUALIFIER_CONTROL) && key==0x42) {
+        G.editor_action=(qualifier&(IEQUALIFIER_LSHIFT|IEQUALIFIER_RSHIFT))?EDITOR_PREVROOM:EDITOR_NEXTROOM;return 1;
+    }
+    if((qualifier&IEQUALIFIER_CONTROL) && key==0x27){G.editor_action=EDITOR_QUICKROOM;return 1;}
+    if((qualifier&IEQUALIFIER_CONTROL) && key==0x16){G.editor_action=EDITOR_NEXTUNREAD;return 1;}
     if ((key == 0x44 || key == 0x43) &&
         (qualifier & (IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND))) {
         G.editor_action = EDITOR_SEND; consumed = 1;
@@ -1138,6 +1208,10 @@ static void input_events(void)
         if (action == EDITOR_INSERT && G.n_sugg) { composer_capture(); complete_suggestion(G.sugg_sel); }
         else if (action == EDITOR_DISMISS) hide_suggestions();
         else if (action == EDITOR_SEND) cmd_send_input();
+        else if(action==EDITOR_NEXTROOM) switch_conversation(1);
+        else if(action==EDITOR_PREVROOM) switch_conversation(-1);
+        else if(action==EDITOR_QUICKROOM)quick_conversation();
+        else if(action==EDITOR_NEXTUNREAD)next_unread();
         else if (action == EDITOR_NEWLINE) {
             hide_suggestions();
             DoGadgetMethod((struct Gadget *)G.g[G_INPUT], G.win, NULL,
@@ -1222,6 +1296,7 @@ static int room_matches(const RcRoom *r)
     buf_free(&label); return found;
 }
 
+#include "draft_runtime.inc"
 #include "server_context.inc"
 #include "server_tree.inc"
 #include "dock_state.inc"
@@ -1552,6 +1627,25 @@ static void open_web_link(const char *url)
     buf_free(&cmd);
 }
 
+static NetMsg *inline_reaction_command(int message,int index)
+{
+    const char *p;const RcMsg *target;char code[64];NetMsg *m;int length;
+    if(G.inline_reaction_pending || !G.connected || message<0 || message>=G.msgs.count)return NULL;
+    target=&G.msgs.items[message];p=target->reactions;
+    while(p && index-- >0) {p=strchr(p,'\n');if(p)p++;}
+    if(!p)return NULL;
+    length=strcspn(p," \n");if(length<=0 || length>=(int)sizeof(code))return NULL;
+    memcpy(code,p,length);code[length]=0;m=netmsg_new(NC_REACT);if(!m)return NULL;
+    m->a_rid=ar_strdup(G.cur_rid);m->a_uid=ar_strdup(target->id);m->a_text=ar_strdup(code);m->a_interval=-1;
+    m->a_verify=!rc_reaction_has(target,code,G.username);
+    if(!m->a_rid || !m->a_uid || !m->a_text){netmsg_free(m);return NULL;}
+    return m;
+}
+static void inline_reaction_click(int message,int index)
+{
+    NetMsg *command=inline_reaction_command(message,index);
+    if(command) {G.inline_reaction_pending=1;send_cmd(command);}
+}
 static void on_chat_click(int x, int y)
 {
     struct IBox box;
@@ -1560,22 +1654,36 @@ static void on_chat_click(int x, int y)
     if (!area_box(G.g[G_MSGS], &box)) return;
     if(G.server_view) return;
     if (!G.n_sugg) {
+        int reaction,row=G.chat.line_h>0?G.chat.top+y/G.chat.line_h:-1;struct TextFont *old=G.win->RPort->Font;
+        if(G.chat_font)SetFont(G.win->RPort,G.chat_font);
+        reaction=chat_reaction_hit(&G.chat,G.win->RPort,x,y);SetFont(G.win->RPort,old);
+        if(reaction>=0 && row>=0 && row<G.chat.n) {inline_reaction_click(G.chat.v[row].msg_index,reaction);return;}
         const char *url = chat_link_hit(&G.chat, x, y);
         if (url) { open_web_link(url); return; }
-        int message, file, row = G.chat.line_h > 0 ? G.chat.top + y / G.chat.line_h : -1;
+        int message, file, file_row = G.chat.line_h > 0 ? G.chat.top + y / G.chat.line_h : -1;
+        row=file_row;
         if (y >= 0 && row >= 0 && row < G.chat.n) {
             message = G.chat.v[row].msg_index;
             if (message >= 0 && message < G.msgs.count) {
                 ar_strlcpy(G.copy_id, G.msgs.items[message].id, sizeof(G.copy_id));
                 ar_strlcpy(G.copy_rid, G.cur_rid, sizeof(G.copy_rid));
                 G.copy_chat = 1; mark_dirty(DIRTY_CHAT);
-                set_status("Message selected - Amiga+C copies text");
+                set_status("Message selected - Amiga+C copies, Amiga+T actions");
             }
         }
         if (chat_file_hit(&G.chat, y, &message, &file)) {
             G.copy_file = file;
-            if (G.msgs.items[message].files[file].image && G.prefs.inline_images) image_toggle(message, file);
-            else download_attachment(message, file);
+            struct TextFont *font=G.win->RPort->Font; int action;
+            if(G.chat_font)SetFont(G.win->RPort,G.chat_font);
+            action=chat_file_action(&G.chat,G.win->RPort,x,y);SetFont(G.win->RPort,font);
+            if(row>=0 && row<G.chat.n && G.chat.v[row].kind==VL_FILE_ACTION && action<0)return;
+            if(action==2) download_attachment(message,file);
+            else if(action==1 || (row>=0 && row<G.chat.n && G.chat.v[row].kind==VL_IMAGE)) {
+                if(G.msgs.items[message].files[file].image)open_external_image(message,file);
+                else download_attachment(message,file);
+            } else if(G.msgs.items[message].files[file].image && G.prefs.inline_images)image_toggle(message,file);
+            else if(G.msgs.items[message].files[file].image)open_external_image(message,file);
+            else download_attachment(message,file);
         }
         return;
     }
@@ -1655,7 +1763,7 @@ static void load_older(void)
 {
     NetMsg *m;
     if (G.server_view || !G.connected || !G.cur_rid[0] || G.loading_rid[0] || G.history_pending || G.history_exhausted || !G.msgs.count) return;
-    if (G.msgs.count >= MAX_MESSAGES) { set_status("History limit reached (1000 messages); reopen the room for latest messages"); return; }
+    if (G.msgs.count >= MAX_MESSAGES) { set_status("Message retention limit reached; adjust Preferences / Memory to load more"); return; }
     m = netmsg_new(NC_HISTORY); if (!m) return;
     m->a_rid = ar_strdup(G.cur_rid);
     m->a_before = G.msgs.items[0].ts_ms;
@@ -1671,7 +1779,7 @@ static void on_older(NetMsg *m)
     int count;
     if (strcmp(m->rid, G.cur_rid) || m->a_interval != G.room_serial) return;
     G.history_pending = 0;
-    if (m->rc != RC_OK) { set_status_utf8(m->text[0] ? m->text : rc_strerror(m->rc)); return; }
+    if (m->rc != RC_OK) { G.unread_seek=0;set_status_utf8(m->text[0] ? m->text : rc_strerror(m->rc)); return; }
     earliest = G.msgs.count ? G.msgs.items[0].ts_ms : 0;
     count = m->msgs.count;
     remember_anchor();
@@ -1680,6 +1788,7 @@ static void on_older(NetMsg *m)
     unread_resolve();
     msgs_rebuild(0);
     set_status(G.history_exhausted ? "Beginning of room history" : "Older messages loaded - scroll up for more");
+    if(G.unread_seek)jump_unread();
 }
 
 static void download_attachment(int message, int file)
@@ -1703,9 +1812,10 @@ static void download_attachment(int message, int file)
     if (!name[0] || !strcmp(name, ".") || !strcmp(name, "..")) strcpy(name, "attachment");
     view_file_size(file_size,sizeof(file_size),a->size);
     snprintf(save_title,sizeof(save_title),"Save attachment (%s; maximum 8 MiB)",file_size);
+    {BPTR drawer=CreateDir(G.prefs.download_dir);if(drawer)UnLock(drawer);}
     fr = AllocAslRequestTags(ASL_FileRequest, ASLFR_Window, (ULONG)G.win,
             ASLFR_TitleText, (ULONG)save_title, ASLFR_DoSaveMode, TRUE,
-            ASLFR_InitialFile, (ULONG)name, TAG_END);
+            ASLFR_InitialDrawer,(ULONG)G.prefs.download_dir, ASLFR_InitialFile, (ULONG)name, TAG_END);
     if (!fr) return;
     if (!AslRequestTags(fr, TAG_END)) { FreeAslRequest(fr); return; }
     ar_strlcpy(path, fr->fr_Drawer, sizeof(path));
@@ -1722,9 +1832,12 @@ static void download_attachment(int message, int file)
     m = netmsg_new(NC_DOWNLOAD); if (!m) return;
     m->a_url = ar_strdup(a->url); m->a_text = ar_strdup(path);
     m->a_verify = a->image && G.prefs.preview_images;
+    if(G.prefs.low_memory) m->a_before=2UL*1024*1024;
     if (!m->a_url || !m->a_text) { netmsg_free(m); return; }
     transfer_dialog(m);
 }
+
+#include "external_images.inc"
 
 static void on_downloaded(NetMsg *m)
 {
@@ -1732,20 +1845,8 @@ static void on_downloaded(NetMsg *m)
     if(G.transfer_dialog) { G.transfer_rc=m->rc; ar_strlcpy(G.transfer_status,m->text[0]?m->text:rc_strerror(m->rc),sizeof(G.transfer_status)); }
     if (m->rc != RC_OK) { if(G.transfer_dialog) return; request_utf8("Attachment download failed", m->text[0] ? m->text : rc_strerror(m->rc)); return; }
     set_status(m->text[0] ? m->text : "Attachment saved");
-    if (m->a_verify) {
-        Buf cmd; const char *p;
-        buf_init(&cmd);
-        if (!shell_argument(&cmd, G.prefs.image_viewer)) { buf_free(&cmd); return; }
-        buf_puts(&cmd, " \"");
-        for (p = m->a_text; *p; p++) {
-            if (*p == '*' || *p == '\"') buf_putc(&cmd, '*');
-            buf_putc(&cmd, *p);
-        }
-        buf_putc(&cmd, '\"');
-        if (!cmd.oom && launch_helper(buf_str(&cmd)) < 0)
-            request("AmiRocket", "File saved. MultiView could not be started; open the saved image manually.");
-        buf_free(&cmd);
-    }
+    if(m->a_verify==2) G.external_pending=0;
+    if(m->a_verify) launch_image_viewer(m->a_text);
 }
 
 static void load_chat_font(void)
@@ -1805,6 +1906,14 @@ static void sync_conversation_focus(void)
 
 static void cmd_open_room(const char *rid)
 {
+    G.unread_seek=0;
+    if(!draft_bind(rid)) {
+        const char *old=strrchr(G.draft_key,'\n');
+        request("Draft kept","Could not retain the draft safely. Copy, shorten or clear it before switching conversations.");
+        if(old && old[1]) { ar_strlcpy(G.cur_rid,old+1,sizeof(G.cur_rid)); cmd_open_room(G.cur_rid); }
+        return;
+    }
+    if(G.running_client) prefs_save_client_state();
     unread_capture(rid);
     ar_strlcpy(G.loading_rid,rid,sizeof(G.loading_rid));
     sync_conversation_focus();
@@ -1827,6 +1936,8 @@ static void cmd_simple(int kind)
         send_cmd(m);
 }
 
+#include "send_recovery.inc"
+#include "navigation_polish.inc"
 static void cmd_send_input(void)
 {
     STRPTR txt = NULL;
@@ -1864,7 +1975,8 @@ static void cmd_send_input(void)
     m->a_rid = ar_strdup(G.cur_rid);
     m->a_text = t;
     if(!m->a_rid) { netmsg_free(m); set_status("Not sent: out of memory; draft kept"); return; }
-    G.send_pending = 1;
+    if(!send_record_prepare(m)){netmsg_free(m);set_status("Not sent: delivery record or draft could not be saved, or retry cancelled");send_state_refresh();return;}
+    G.send_pending = 1;send_state_refresh();
     send_cmd(m);
     ActivateLayoutGadget((struct Gadget *)G.g[0], G.win, NULL, (ULONG)G.g[G_INPUT]);
 }
@@ -1950,10 +2062,66 @@ static void application_event(const char *kind,const char *room,const char *user
     plugins_event(kind,room,user,text); arexx_event(kind,room,user,text);
 }
 
+static int notification_mention(const char *text,const char *name)
+{
+    char key[104]; const char *p=text; size_t n;
+    if(!text || !name || !*name) return 0;
+    snprintf(key,sizeof(key),"@%s",name); n=strlen(key);
+    while((p=strstr(p,key))) {
+        unsigned char after=p[n],before=p==text?' ':p[-1];
+        if((before==' ' || before=='\n' || before=='\t' || before=='(') &&
+           !(after>='a'&&after<='z') && !(after>='A'&&after<='Z') && !(after>='0'&&after<='9') && after!='_' && after!='-' && after!='.') return 1;
+        p+=n;
+    }
+    return 0;
+}
+static int notification_allowed(int slot,const char *rid,const char *user,const char *text)
+{
+    const ServerPrefs *p=&G.prefs.servers[slot]; const char *me=slot==G.active_server?G.username:G.servers[slot].username;
+    (void)rid;
+    if(p->quiet || (user && me[0] && !strcmp(user,me))) return 0;
+    return !p->notify_mentions || notification_mention(text,me) || notification_mention(text,"all") || notification_mention(text,"here");
+}
+static void notification_sound_clear(void)
+{
+    if(G.notification_sound) {DoMethod(G.notification_sound,DTM_TRIGGER,NULL,STM_STOP,NULL);DisposeDTObject(G.notification_sound);}
+    G.notification_sound=NULL;G.notification_sound_path[0]=0;
+}
+static int notification_sound_play(const char *path)
+{
+    char resolved[512];
+    if(path && !strncmp(path,"PROGDIR:",8) && prefs_extra(&G.prefs,"workspace.data_dir","")[0]) {
+        if(prefs_resource_path(&G.prefs,path,resolved,sizeof(resolved))<0)return 0;
+        path=resolved;
+    } else if(path && !strncmp(path,"PROGDIR:",8) && G.prefs_only) {
+        BPTR local=Lock(path,ACCESS_READ);
+        if(local)UnLock(local);
+        else {
+            ar_strlcpy(resolved,prefs_extra(&G.prefs,"workspace.install_dir","SYS:Utilities"),sizeof(resolved));
+            if(!AddPart(resolved,path+8,sizeof(resolved)))return 0;
+            path=resolved;
+        }
+    }
+    if(!path || !*path || !DataTypesBase) {DisplayBeep(G.scr);return 1;}
+    if(!G.notification_sound || strcmp(path,G.notification_sound_path)) {
+        BPTR lock=Lock(path,ACCESS_READ);struct FileInfoBlock *info=AllocDosObject(DOS_FIB,NULL);int valid=0;
+        if(lock && info && Examine(lock,info) && info->fib_DirEntryType<0 && info->fib_Size>0 && info->fib_Size<=256*1024)valid=1;
+        if(lock)UnLock(lock);
+        if(info)FreeDosObject(DOS_FIB,info);
+        notification_sound_clear();
+        if(valid)G.notification_sound=NewDTObject((APTR)path,DTA_SourceType,DTST_FILE,DTA_GroupID,GID_SOUND,SDTA_Volume,64,SDTA_Cycles,1,TAG_END);
+        if(!G.notification_sound) {DisplayBeep(G.scr);return 0;}
+        ar_strlcpy(G.notification_sound_path,path,sizeof(G.notification_sound_path));
+    }
+    return DoMethod(G.notification_sound,DTM_TRIGGER,NULL,STM_PLAY,NULL)!=0;
+}
 static void server_message_event(int slot,const char *rid,const char *user,const char *text)
 {
     char qualified[84]; snprintf(qualified,sizeof(qualified),"%d:%s",slot+1,rid);
-    application_event("SERVERMESSAGE",qualified,user,text);
+    if(notification_allowed(slot,rid,user,text)) {
+        application_event("SERVERMESSAGE",qualified,user,text);
+        if(G.prefs.servers[slot].sound && !(slot==G.active_server && conversation_visible()) && amiga_local_ms()-G.notification_sound_at>=2000) {G.notification_sound_at=amiga_local_ms();notification_sound_play(G.prefs.notification_sound);}
+    }
 }
 
 
@@ -2266,13 +2434,15 @@ static void on_sent(NetMsg *m)
         server_notice(G.active_server,m->text[0]?m->text:rc_strerror(m->rc));
         { char qualified[96]; snprintf(qualified,sizeof(qualified),"%d:%s",G.active_server+1,m->rid);
           application_event("SENDFAILED",qualified,G.username,m->text); }
-        request_utf8("AmiRocket - send failed or unconfirmed", m->text[0] ? m->text : rc_strerror(m->rc));
+        set_status("Delivery failed or unconfirmed; draft kept. Use Retry send.");send_state_refresh();
         return;
     }
+    send_record_done(G.active_server,m);send_state_refresh();
+    draft_sent(G.active_server,m->rid,m->a_text);
     { Buf current; buf_init(&current); composer_capture();
       latin1_to_utf8(&current, G.hook_buf);
       if (!G.composer_overlong && !strcmp(m->rid, G.cur_rid) && !strcmp(ar_trim(current.data ? current.data : (char *)""), m->a_text)) composer_set("", 0);
-      buf_free(&current); hide_suggestions();
+      buf_free(&current); hide_suggestions(); draft_checkpoint();
     }
     if (!strcmp(m->rid, G.cur_rid) && m->msgs.count) {
         remember_anchor();
@@ -2307,7 +2477,7 @@ static void on_update(NetMsg *m)
     { int j,k;
       for(j=0;j<m->msgs.count;j++) {
         for(k=0;k<G.msgs.count;k++) if(!strcmp(m->msgs.items[j].id,G.msgs.items[k].id)) break;
-        if(k==G.msgs.count) { application_event("MESSAGE",m->rid,m->msgs.items[j].username,m->msgs.items[j].text);
+        if(k==G.msgs.count) { if(notification_allowed(G.active_server,m->rid,m->msgs.items[j].username,m->msgs.items[j].text)) application_event("MESSAGE",m->rid,m->msgs.items[j].username,m->msgs.items[j].text);
             if(G.multi) server_message_event(G.active_server,m->rid,m->msgs.items[j].username,m->msgs.items[j].text); }
       }
     }
@@ -2315,8 +2485,6 @@ static void on_update(NetMsg *m)
         remember_anchor();
         rc_msglist_merge(&G.msgs, &m->msgs, MAX_MESSAGES);
         msgs_rebuild(G.chat.follow);
-        if (G.win && !(G.win->Flags & WFLG_WINDOWACTIVE))
-            DisplayBeep(G.scr);
     }
     unread_resolve();
     if(conversation_visible() && (m->msgs.count || m->rooms.count)) { G.focus_visible=-1; sync_conversation_focus(); }
@@ -2326,8 +2494,8 @@ static void on_update(NetMsg *m)
 
 static void on_status(NetMsg *m)
 {
-    server_event(G.active_server,m->rc,m->text); G.servers[G.active_server].reconnecting=m->a_interval>0;
-    if(m->rc==RC_OK) G.servers[G.active_server].last_error=0;
+    server_event(G.active_server,m->rc,m->text); G.servers[G.active_server].reconnecting=m->a_interval>0; health_status(G.active_server,m);
+    if(m->rc==RC_OK) { ServerState *s=&G.servers[G.active_server]; s->last_error=s->cooling=s->health_retry=0; s->retry_until=0; }
     if (m->rc == RC_ERR_AUTH) {
         forget_login();
         went_offline("Logged out");
@@ -2337,12 +2505,31 @@ static void on_status(NetMsg *m)
     set_status_utf8(m->text); rooms_rebuild();
 }
 
+static void on_message_action(NetMsg *m);
 static void handle_port(void)
 {
     struct Message *msg;
 
     while ((msg = GetMsg(G.port)) != NULL) {
         NetMsg *m = (NetMsg *)msg;
+        if(m->kind>=NC_THREAD && m->kind<=NC_THREAD_SEND && msg->mn_Node.ln_Type==NT_REPLYMSG) {
+            G.pending--;
+            if(m->kind==NC_REACT && m->a_interval==-1) {
+                G.inline_reaction_pending=0;
+                if(m->rc==RC_OK) {NetMsg *poll=netmsg_new(NC_POLL_NOW);if(poll)server_send(m->server_slot,poll);}
+                else set_status_utf8(m->text[0]?m->text:"Reaction could not be confirmed");
+            } else on_message_action(m);
+            netmsg_free(m);continue;
+        }
+        if(m->kind==NC_SEARCH && msg->mn_Node.ln_Type==NT_REPLYMSG) { G.pending--; on_search(m); netmsg_free(m); continue; }
+        if(m->kind==NE_NETWORK) {
+            if(m->server_slot>=0 && m->server_slot<PREFS_SERVERS_MAX && m->server_generation==G.servers[m->server_slot].generation)
+            { ServerState *s=&G.servers[m->server_slot];
+                s->retry_until=amiga_local_ms()+(ar_ms)(m->a_before>m->a_interval?m->a_before:m->a_interval)*1000; s->cooling=m->a_interval>0; s->health_retry=m->a_verify || m->a_background;
+                prefs_service_network(G.prefs_service,m->server_slot,m->text); mark_dirty(DIRTY_SIDE|DIRTY_HEADER);
+            }
+            worker_done(m); continue;
+        }
         if(G.multi && (m->server_slot<0 || m->server_slot>=PREFS_SERVERS_MAX ||
             m->server_generation!=G.servers[m->server_slot].generation || m->server_slot!=G.active_server)) {
             if(m->server_slot>=0 && m->server_slot<PREFS_SERVERS_MAX && m->server_generation==G.servers[m->server_slot].generation) server_background(m);
@@ -2367,6 +2554,11 @@ static void handle_port(void)
                 }
                 break;
             case NC_PRESENCE: on_presence(m); break;
+            case NC_SEARCH: on_search(m); break;
+            case NC_UPLOAD:
+                G.download_pending=0; G.transfer_rc=m->rc;
+                ar_strlcpy(G.transfer_status,m->text[0]?m->text:m->rc==RC_OK?"Attachment sent":rc_strerror(m->rc),sizeof(G.transfer_status));
+                server_notice(G.active_server,G.transfer_status); set_status_utf8(G.transfer_status); if(m->rc==RC_OK) cmd_simple(NC_POLL_NOW); break;
             case NC_DOWNLOAD: on_downloaded(m); break;
             case NC_SEND:      on_sent(m); break;
             case NC_LOGOUT:    went_offline("Logged out"); break;
@@ -2378,14 +2570,16 @@ static void handle_port(void)
             case NE_TRANSFER:
                 if(G.transfer_dialog && m->sent_at==G.transfer_serial && G.transfer_text && !G.transfer_cancelled) {
                     char *text=G.transfer_progress_text;
-                    if(m->a_interval>0) snprintf(text,sizeof(G.transfer_progress_text),"Downloading: %ld / %d KiB (%ld%%)",(long)m->a_before/1024,m->a_interval/1024,(long)(m->a_before*100/m->a_interval));
-                    else snprintf(text,sizeof(G.transfer_progress_text),"Downloading: %ld KiB",(long)m->a_before/1024);
+                    transfer_caption(m->a_before,m->a_interval,G.transfer_started,amiga_local_ms(),text,sizeof(G.transfer_progress_text));
                     SetGadgetAttrs((struct Gadget *)G.transfer_text,G.transfer_win,NULL,GA_Text,(ULONG)text,TAG_END);
+                    RefreshGList((struct Gadget *)G.transfer_text,G.transfer_win,NULL,1);
+                    if(G.transfer_gauge)SetGadgetAttrs((struct Gadget *)G.transfer_gauge,G.transfer_win,NULL,FUELGAUGE_Level,m->a_interval>0?(ULONG)(m->a_before*100/m->a_interval):0,TAG_END);
                 }
                 break;
             case NE_RECONNECTED: on_connected(m); break;
             case NE_UPDATE: on_update(m); break;
             case NE_PRESENCE: on_presence(m); break;
+            case NE_NETWORK: prefs_service_network(G.prefs_service,m->server_slot,m->text); break;
             case NE_STATUS: on_status(m); break;
             }
             worker_done(m);
@@ -2402,7 +2596,7 @@ static void about(void)
              "AmiRocket " AR_VERSION "\n"
              "A Rocket.Chat client for AmigaOS 3.2\n\n"
              "Networking: bsdsocket.library, TLS: AmiSSL\n"
-             "Messages are fetched every %d seconds.", G.prefs.interval);
+             "Realtime events with polling fallback (%d seconds).", G.prefs.interval);
     request("About AmiRocket", G.about);
 }
 
@@ -2462,15 +2656,19 @@ static void composer_clipboard(const char *command)
 static void apply_theme(int idx);
 static void handle_preferences(void);
 #include "ui_panels.inc"
+#include "message_actions.inc"
 
 static void launch_preferences_for_server(int slot)
 {
-    char path[512]; BPTR lock, dir = GetProgramDir(); Buf cmd;
-    if (!dir || !NameFromLock(dir, path, sizeof(path)) || !AddPart(path, "AmiRocketPrefs", sizeof(path))) {
-        request("Preferences", "Could not locate the program directory."); return;
+    char path[512]; BPTR lock=0,dir=GetProgramDir(); Buf cmd;
+    /* Keep portable/development copies usable; installed copies have no local
+     * Preferences binary and use the recorded Prefs drawer instead. */
+    if(dir && NameFromLock(dir,path,sizeof(path)) && AddPart(path,"AmiRocketPrefs",sizeof(path))) lock=Lock(path,ACCESS_READ);
+    if(!lock) {
+        ar_strlcpy(path,prefs_extra(&G.prefs,"workspace.prefs_dir","SYS:Prefs"),sizeof(path));
+        if(AddPart(path,"AmiRocketPrefs",sizeof(path))) lock=Lock(path,ACCESS_READ);
     }
-    lock = Lock(path, ACCESS_READ);
-    if (!lock) { request("Preferences", "Place AmiRocketPrefs beside the AmiRocket executable."); return; }
+    if(!lock) { request("Preferences","Could not find AmiRocketPrefs. Reinstall it in SYS:Prefs or the configured Preferences drawer."); return; }
     UnLock(lock); buf_init(&cmd);
     if(!shell_argument(&cmd,path)) { buf_free(&cmd); return; }
     if(slot>=0) buf_printf(&cmd," EDIT=%d",slot+1);
@@ -2484,8 +2682,8 @@ static void launch_preferences(void) { launch_preferences_for_server(-1); }
 
 static int preference_display_changed(const Prefs *p)
 {
-    return p->show_emoji != G.prefs.show_emoji || p->show_avatars != G.prefs.show_avatars ||
-        p->inline_images != G.prefs.inline_images || p->ownscreen != G.prefs.ownscreen ||
+    return p->preview_width!=G.prefs.preview_width || p->low_memory!=G.prefs.low_memory || p->message_limit!=G.prefs.message_limit || p->image_cache_kib!=G.prefs.image_cache_kib || p->show_emoji != G.prefs.show_emoji || p->show_avatars != G.prefs.show_avatars ||
+        p->auto_thumbnails != G.prefs.auto_thumbnails || p->inline_images != G.prefs.inline_images || p->ownscreen != G.prefs.ownscreen ||
         p->chat_font_size != G.prefs.chat_font_size || strcmp(p->theme, G.prefs.theme) || strcmp(p->chat_font, G.prefs.chat_font);
 }
 static void apply_preferences(const Prefs *next, int permanent)
@@ -2493,11 +2691,24 @@ static void apply_preferences(const Prefs *next, int permanent)
     int display; NetMsg *m;
     if(next->extra_count<0 || next->extra_count>PREFS_EXTRA_MAX) return;
     display=preference_display_changed(next);
-    if (next->interval != G.prefs.interval) {
-        m = netmsg_new(NC_SET_INTERVAL); if (m) { m->a_interval = next->interval; send_cmd(m); }
+    if (G.running_client && (next->realtime != G.prefs.realtime || next->interval != G.prefs.interval || next->request_spacing_ms!=G.prefs.request_spacing_ms ||
+        next->background_interval!=G.prefs.background_interval || next->avatar_disk_cache!=G.prefs.avatar_disk_cache || strcmp(next->cache_dir,G.prefs.cache_dir))) {
+        m = netmsg_new(NC_SET_INTERVAL); if (m) { m->a_realtime=next->realtime; m->a_interval = next->interval; m->a_before=next->request_spacing_ms; m->a_background=next->background_interval; m->a_verify=next->avatar_disk_cache; m->a_text=ar_strdup(next->cache_dir); send_cmd(m); }
     }
-    G.prefs.interval = next->interval; G.prefs.show_emoji = next->show_emoji; G.prefs.show_avatars = next->show_avatars;
+    if(strcmp(G.prefs.cache_dir,next->cache_dir))images_reset();
+    if(strcmp(G.prefs.notification_sound,next->notification_sound))notification_sound_clear();
+    ar_strlcpy(G.prefs.notification_sound,next->notification_sound,sizeof(G.prefs.notification_sound));
+    ar_strlcpy(G.prefs.cache_dir,next->cache_dir,sizeof(G.prefs.cache_dir));
+    ar_strlcpy(G.prefs.download_dir,next->download_dir,sizeof(G.prefs.download_dir));
+    G.prefs.preview_width=next->preview_width;
+    G.prefs.low_memory=next->low_memory; G.prefs.message_limit=next->message_limit; G.prefs.image_cache_kib=next->image_cache_kib;
+    if(display) { int i; RcMsgList empty; rc_msglist_init(&empty); rc_msglist_merge(&G.msgs,&empty,MAX_MESSAGES);
+        for(i=0;i<PREFS_SERVERS_MAX;i++) rc_msglist_merge(&G.servers[i].msgs,&empty,MAX_MESSAGES);
+        avatar_reset(); images_reset(); G.chat.width=0; msgs_rebuild(0); }
+    G.prefs.request_spacing_ms=next->request_spacing_ms; G.prefs.background_interval=next->background_interval; G.prefs.avatar_disk_cache=next->avatar_disk_cache;
+    G.prefs.realtime=next->realtime; G.prefs.interval = next->interval; G.prefs.show_emoji = next->show_emoji; G.prefs.show_avatars = next->show_avatars;
     G.prefs.inline_images = next->inline_images; G.prefs.ownscreen = next->ownscreen; G.prefs.open_links = next->open_links;
+    G.prefs.auto_thumbnails=next->auto_thumbnails; G.prefs.external_images=next->external_images;
     G.prefs.preview_images = next->preview_images; G.prefs.chat_font_size = next->chat_font_size;
     ar_strlcpy(G.prefs.theme,next->theme,sizeof(G.prefs.theme)); ar_strlcpy(G.prefs.chat_font,next->chat_font,sizeof(G.prefs.chat_font));
     ar_strlcpy(G.prefs.browser,next->browser,sizeof(G.prefs.browser)); ar_strlcpy(G.prefs.image_viewer,next->image_viewer,sizeof(G.prefs.image_viewer));
@@ -2534,8 +2745,10 @@ static void reload_preferences(void)
     Prefs *next;
     if (!G.running_client || G.session_override) return;
     next = ar_malloc(sizeof(*next)); if (!next) return;
-    if (!prefs_load(next) && (preference_display_changed(next) || next->interval!=G.prefs.interval || next->open_links!=G.prefs.open_links ||
-        next->preview_images!=G.prefs.preview_images || strcmp(next->browser,G.prefs.browser) || strcmp(next->image_viewer,G.prefs.image_viewer) ||
+    if (!prefs_load(next) && (preference_display_changed(next) || next->realtime!=G.prefs.realtime || next->interval!=G.prefs.interval ||
+        next->request_spacing_ms!=G.prefs.request_spacing_ms || next->background_interval!=G.prefs.background_interval ||
+        next->avatar_disk_cache!=G.prefs.avatar_disk_cache || next->open_links!=G.prefs.open_links ||
+        next->external_images!=G.prefs.external_images || next->preview_images!=G.prefs.preview_images || strcmp(next->browser,G.prefs.browser) || strcmp(next->image_viewer,G.prefs.image_viewer) ||
         memcmp(next->servers,G.prefs.servers,sizeof(next->servers)) || next->servers_defined!=G.prefs.servers_defined ||
         next->extra_count!=G.prefs.extra_count || memcmp(next->extra,G.prefs.extra,sizeof(next->extra)))) apply_preferences(next,1);
     memset(next,0,sizeof(*next)); ar_free(next);
@@ -2563,13 +2776,21 @@ static void handle_menu(UWORD code)
         case M_NEXTSUGG: if (G.n_sugg) { G.sugg_sel = (G.sugg_sel + 1) % G.n_sugg; mark_dirty(DIRTY_CHAT); } break;
         case M_PREVSUGG: if (G.n_sugg) { G.sugg_sel = (G.sugg_sel + G.n_sugg - 1) % G.n_sugg; mark_dirty(DIRTY_CHAT); } break;
         case M_NEXTUNREAD: next_unread(); break;
-        case M_JUMPUNREAD: jump_unread(); break;
+        case M_JUMPUNREAD: seek_first_unread(); break;
         case M_OLDER: load_older(); break;
         case M_SEND: cmd_send_input(); break;
+        case M_RETRYSEND: retry_failed_send();break;
+        case M_FORGETSEND:forget_failed_send();break;
+        case M_SWITCHNEXT:switch_conversation(1);break;
+        case M_SWITCHPREV:switch_conversation(-1);break;
+        case M_QUICKROOM:quick_conversation();break;
         case M_PREFS: launch_preferences(); break;
         case M_NEWDM: new_conversation(0); break;
         case M_NEWCHANNEL: new_conversation(1); break;
         case M_NEWPRIVATE: new_conversation(2); break;
+        case M_SEARCH: search_window(); break;
+        case M_UPLOAD: upload_attachment(); break;
+        case M_CLEARCACHE: clear_media_caches(); break;
         case M_CLEARIMAGES: images_reset(); msgs_rebuild(0); set_status("Image preview cache cleared"); break;
         case M_SAVEFILE: {
             int i;
@@ -2581,7 +2802,14 @@ static void handle_menu(UWORD code)
         case M_COPY: if (G.copy_chat) copy_message(); else composer_clipboard("COPY"); break;
         case M_CUT: composer_clipboard("CUT"); break;
         case M_PASTE: composer_clipboard("PASTE"); break;
+        case M_OPENIMAGE: {
+            int i; for(i=0;i<G.msgs.count;i++) if(!strcmp(G.copy_rid,G.cur_rid) && !strcmp(G.copy_id,G.msgs.items[i].id)) break;
+            if(i<G.msgs.count) open_external_image(i,G.copy_file>=0 && G.copy_file<G.msgs.items[i].file_count?G.copy_file:0);
+            break;
+        }
+        case M_CLEAREXTERNAL: external_images_clear(); break;
         case M_COPYMSG: copy_message(); break;
+        case M_MESSAGE: message_actions(); break;
         case M_ABOUT:      about(); break;
         case M_QUIT:       G.quit = 1; break;
         case M_REFRESH:    if (G.connected) cmd_simple(NC_POLL_NOW); break;
@@ -2626,6 +2854,8 @@ static void handle_main(void)
                 if(area_box(G.g[G_ROOMS],&box)) { G.side_menu_slot=G.active_server; G.side_menu_x=G.win->LeftEdge+box.Left+20; G.side_menu_y=G.win->TopEdge+box.Top+10; G.side_menu_pending=1; }
                 break;
             }
+            if((code&IEQUALIFIER_CONTROL) && editor_key(result&WMHI_KEYMASK,code)){input_events();break;}
+            if((result&WMHI_KEYMASK)==0x45){G.unread_seek=0;hide_suggestions();if(G.g[G_INPUT])ActivateLayoutGadget((struct Gadget *)G.g[0],G.win,NULL,(ULONG)G.g[G_INPUT]);break;}
             /* NewMouse wheel codes, for mouse drivers without V47 wheel events */
             if ((result & WMHI_KEYMASK) == 0x7A)
                 scroll_chat(G.chat.top - 3);
@@ -2655,9 +2885,13 @@ static void handle_main(void)
             case G_STRIKE: toolbar_format("~", "~", "text"); break;
             case G_INLINECODE: toolbar_format("`", "`", "code"); break;
             case G_CODEBLOCK: toolbar_format("```\n", "\n```", "code"); break;
+            case G_UPLOAD: upload_attachment(); break;
+            case G_SEARCH: search_window(); break;
+            case G_FIRSTUNREAD: seek_first_unread(); break;
+            case G_RETRYSEND: retry_failed_send(); break;
             case G_LINK: toolbar_format("[", "](https://)", "label"); break;
             case G_INPUT: editor_wake(); break;
-            case G_FILTER: G.filter_changed = 1; break;
+            case G_FILTER: G.filter_changed=1;input_events();filtered_conversation();break;
             case G_SEND:
                 cmd_send_input();
                 break;
@@ -2667,6 +2901,7 @@ static void handle_main(void)
     }
     sync_conversation_focus();
     if(G.side_menu_pending) server_context_popup();
+    if(G.action_menu_pending) { G.action_menu_pending=0; message_actions(); }
 }
 
 static void handle_login(void)
@@ -2713,6 +2948,7 @@ static int open_libs(void)
         { &WindowBase, "window.class", 44 },
         { &LayoutBase, "gadgets/layout.gadget", 44 },
         { &ButtonBase, "gadgets/button.gadget", 44 },
+        { &FuelGaugeBase, "gadgets/fuelgauge.gadget", 44 },
         { &AslBase, "asl.library", 39 },
         { &DiskfontBase, "diskfont.library", 39 },
         { &TextFieldBase, "gadgets/texteditor.gadget", 47 },
@@ -2753,9 +2989,10 @@ static int open_libs(void)
 
 static void close_libs(void)
 {
+    notification_sound_clear();
     if (G.editor_class) { FreeClass(G.editor_class); G.editor_class = NULL; }
     struct Library **all[] = {
-        &DataTypesBase, &TextFieldBase, &DiskfontBase, &AslBase, &ScrollerBase, &SpaceBase, &LabelBase, &CheckBoxBase, &ListBrowserBase, &StringBase, &ButtonBase, &LayoutBase,
+        &FuelGaugeBase, &DataTypesBase, &TextFieldBase, &DiskfontBase, &AslBase, &ScrollerBase, &SpaceBase, &LabelBase, &CheckBoxBase, &ListBrowserBase, &StringBase, &ButtonBase, &LayoutBase,
         &IconBase, &WindowBase, &UtilityBase, &GadToolsBase, (struct Library **)&GfxBase,
         (struct Library **)&LocaleBase, (struct Library **)&IntuitionBase, NULL
     };
@@ -2995,6 +3232,19 @@ static int sidebar_weight(void)
 {
     int n=atoi(prefs_extra(&G.prefs,"workspace.sidebar","30")); return n<15?15:n>65?65:n;
 }
+static int composer_rows(void)
+{
+    int n=atoi(prefs_extra(&G.prefs,"workspace.composer_rows","4"));
+    return n<2?2:n>12?12:n;
+}
+static int composer_weight(void)
+{
+    int h=G.prefs.win_height>200?G.prefs.win_height:400;
+    int n;
+    h-=(G.scr->RastPort.TxHeight+2)*4+20; if(h<100) h=100;
+    n=((G.scr->RastPort.TxHeight+2)*composer_rows()+6)*100/h;
+    return n<5?5:n>45?45:n;
+}
 static int open_main(void)
 {
     Object *root;
@@ -3100,6 +3350,8 @@ static int open_main(void)
                     End,
                     CHILD_WeightedWidth, 0,
                 End,
+                CHILD_WeightedHeight,100-composer_weight(),
+                CHILD_WeightBar,TRUE,
                 LAYOUT_AddChild, VLayoutObject,
                     LAYOUT_SpaceOuter, FALSE,
                     LAYOUT_InnerSpacing, 0,
@@ -3116,11 +3368,14 @@ static int open_main(void)
                         ICA_TARGET, ICTARGET_IDCMP,
                         TAG_END),
                     CHILD_MinHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
-                    CHILD_MaxHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
                     End,
                     CHILD_MinHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
-                    CHILD_MaxHeight, (G.scr->RastPort.TxHeight + 2) * 2 + 6,
-                    CHILD_WeightedHeight, 0,
+                    CHILD_WeightedHeight, 100,
+                    LAYOUT_AddChild,HLayoutObject,
+                        LAYOUT_AddChild,panel_button(G_FIRSTUNREAD,"First unread"),CHILD_WeightedWidth,0,
+                        LAYOUT_AddChild,G.g[G_RETRYSEND]=panel_button(G_RETRYSEND,"Retry unconfirmed send..."),CHILD_WeightedWidth,0,
+                        LAYOUT_AddChild,SpaceObject,End,
+                    End,CHILD_WeightedHeight,0,
                     LAYOUT_AddChild, HLayoutObject, LAYOUT_InnerSpacing, 1,
                         LAYOUT_AddChild, panel_button(G_EMOJI, ":)"), CHILD_WeightedWidth, 0,
                         LAYOUT_AddChild, panel_button(G_BOLD, "B"), CHILD_WeightedWidth, 0,
@@ -3129,11 +3384,14 @@ static int open_main(void)
                         LAYOUT_AddChild, panel_button(G_INLINECODE, "<>"), CHILD_WeightedWidth, 0,
                         LAYOUT_AddChild, panel_button(G_CODEBLOCK, "Code"), CHILD_WeightedWidth, 0,
                         LAYOUT_AddChild, panel_button(G_LINK, "Link"), CHILD_WeightedWidth, 0,
+                        LAYOUT_AddChild, panel_button(G_UPLOAD, "File"), CHILD_WeightedWidth,0,
+                        LAYOUT_AddChild, panel_button(G_SEARCH, "Find"), CHILD_WeightedWidth,0,
+
                         LAYOUT_AddChild, SpaceObject, End,
                         LAYOUT_AddChild, G.g[G_SEND] = panel_button(G_SEND, "_Send"), CHILD_WeightedWidth, 0,
                     End, CHILD_WeightedHeight, 0,
                 End,
-                CHILD_WeightedHeight, 0,
+                CHILD_WeightedHeight, composer_weight(),
             End,
             CHILD_WeightedWidth, 100-sidebar_weight(),
         End,
@@ -3192,6 +3450,12 @@ static void remember_window(void)
     { struct IBox box; char value[16];
       if(area_box(G.g[G_ROOMS],&box) && G.win->Width>0) {
           snprintf(value,sizeof(value),"%d",(box.Width+18)*100/G.win->Width); prefs_set(&G.prefs,"workspace.sidebar",value);
+      }
+    }
+    { ULONG height=0; char value[16];
+      if(GetAttr(GA_Height,G.g[G_INPUT],&height) && height>6) {
+        int n=(height-6)/(G.scr->RastPort.TxHeight+2); if(n<2) n=2; if(n>12) n=12;
+        snprintf(value,sizeof(value),"%d",n); prefs_set(&G.prefs,"workspace.composer_rows",value);
       }
     }
     G.prefs.win_left = G.win->LeftEdge;
@@ -3313,14 +3577,15 @@ int gui_run(void)
         rc = RETURN_FAIL;
         goto out;
     }
-    G.running_client = 1;
+    G.running_client = 1; draft_start();
     G.prefs_service = prefs_service_start(&G.prefs);
     plugins_start_host();
     arexx_start(control_command);
-    if (G.prefs.interval != 5) {
+    {
         NetMsg *m = netmsg_new(NC_SET_INTERVAL);
         if (m) {
-            m->a_interval = G.prefs.interval;
+            m->a_realtime=G.prefs.realtime; m->a_interval = G.prefs.interval; m->a_before=G.prefs.request_spacing_ms;
+            m->a_background=G.prefs.background_interval; m->a_verify=G.prefs.avatar_disk_cache; m->a_text=ar_strdup(G.prefs.cache_dir);
             send_cmd(m);
         }
     }
@@ -3350,8 +3615,9 @@ int gui_run(void)
         if (G.dirty)
             redraw_dirty();
         if(G.app_port) wsig|=1UL<<G.app_port->mp_SigBit;
-        sigs = Wait(wsig | lsig | arexx_signal() | prefs_service_signal(G.prefs_service) | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C |
+        sigs = Wait(wsig | lsig | client_tick_signal() | arexx_signal() | prefs_service_signal(G.prefs_service) | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C |
                     (G.dirty_sig >= 0 ? 1UL << G.dirty_sig : 0));
+        if(sigs & client_tick_signal()) client_tick_handle();
         if (sigs & arexx_signal()) arexx_handle();
         if (sigs & prefs_service_signal(G.prefs_service)) handle_preferences();
         if (sigs & SIGBREAKF_CTRL_C)
@@ -3363,15 +3629,18 @@ int gui_run(void)
         if (G.lwin_obj && (sigs & lsig))
             handle_login();
     }
+    draft_checkpoint();
     remember_window();
     prefs_save_client_state();
 
 out:
+    draft_stop();
     plugins_stop(); arexx_stop();
     prefs_service_stop(G.prefs_service); G.prefs_service = NULL;
     worker_stop();
     servers_cleanup();
     images_reset();
+    { int i; for(i=0;i<4;i++) external_image_forget(i,0); }
     login_close();
     close_main();
     free_list(&G.room_list);

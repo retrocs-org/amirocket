@@ -20,7 +20,7 @@ static void unread_resolve(void)
     }
     if(first>=0) {
         ar_strlcpy(G.unread_anchor,G.msgs.items[first].id,sizeof(G.unread_anchor));
-        if(!G.read_boundary && G.msgs.items[first].ts_ms>0) G.read_boundary=G.msgs.items[first].ts_ms-1;
+        if(!G.read_boundary && left<=0 && G.msgs.items[first].ts_ms>0) G.read_boundary=G.msgs.items[first].ts_ms-1;
     } else G.unread_anchor[0]=0;
 }
 static int unread_rank(int slot,const RcRoom *a,int other,const RcRoom *b)
@@ -67,10 +67,29 @@ static void next_unread(void)
     for(i=0;i<G.side.n;i++) if(G.side.r[i].server_slot==slot && G.side.r[i].rid && !strcmp(G.side.r[i].rid,rid)) { scroll_side(i); break; }
     if(G.win) ActivateLayoutGadget((struct Gadget *)G.g[0],G.win,NULL,(ULONG)G.g[G_INPUT]);
 }
+static int unread_needs_history(void)
+{
+    int i,available=0;
+    if(!G.unread_seek || !G.boundary_unread || !G.connected || !G.msgs.count || G.history_exhausted || G.msgs.count>=MAX_MESSAGES)return 0;
+    if(G.read_boundary>0)return G.msgs.items[0].ts_ms>G.read_boundary;
+    for(i=0;i<G.msgs.count;i++)if(strcmp(G.msgs.items[i].username,G.username))available++;
+    return available<G.boundary_unread;
+}
 static void jump_unread(void)
 {
     int i; if(G.server_view) return;
+    if(unread_needs_history()){
+        G.unread_seek=1;load_older();set_status("Finding first unread message... Escape stops history loading");return;
+    }
+    G.unread_seek=0;
+    if(G.boundary_unread && G.read_boundary>0 && G.msgs.count>=MAX_MESSAGES && G.msgs.items[0].ts_ms>G.read_boundary)set_status("Retention limit: showing the earliest loaded unread message");
     redraw_dirty();
-    for(i=0;i<G.chat.n;i++) if(G.chat.v[i].kind==VL_UNREAD) { scroll_chat(i); return; }
+    for(i=0;i<G.chat.n;i++) if(G.chat.v[i].kind==VL_UNREAD) { chat_scroll_to(&G.chat,i);draw_chat();return; }
     request("Unread messages","No new-message marker in the loaded history.");
+}
+
+static void seek_first_unread(void)
+{
+    if(G.server_view)return;
+    G.unread_seek=1;jump_unread();
 }

@@ -50,6 +50,7 @@ static void control_summary(Buf *b)
     buf_printf(b,"version=2 epoch=%s seq=%lu dropped=%lu event_pending=%d connected=%d connected_servers=%d servers=%d unread=%d alerts=%d selected=%d selected_connected=%d selected_unread=%d iconified=%d temporary=%d pending=%d port=%s",
         arexx_epoch(),(unsigned long)arexx_sequence(),(unsigned long)arexx_dropped(),arexx_pending(),connected>0,connected,servers,dock_total_unread(),alerts,G.active_server+1,
         !strcmp(dock_server_state(G.active_server),"connected"),dock_unread(G.active_server),G.iconified,G.session_override,G.pending,arexx_port_name());
+    buf_printf(b," transfer=%d",G.transfer_dialog!=0);
 }
 static void control_quoted(Buf *b,const char *text,int limit)
 {
@@ -102,6 +103,12 @@ static int control_command(const char *command,char *out,int size)
     rest=control_word(command,verb,sizeof(verb));
     for(i=0;verb[i];i++) if(verb[i]>='a'&&verb[i]<='z') verb[i]-=32;
     out[0]=0;
+    if(G.transfer_dialog) {
+        static const char *allowed[]={"HELP","CAPABILITIES","STATUS","DOCKSTATUS","SERVERSTATUS","SERVERS","ROOMS","GETCONFIG","DRAFT","PLUGINS","SUBSCRIBE","UNSUBSCRIBE","QUIT","SHOW",NULL};
+        for(i=0;allowed[i] && strcmp(allowed[i],verb);i++);
+        if(!allowed[i]) { snprintf(out,size,"BUSY transfer in progress"); return 10; }
+        if(!strcmp(verb,"SHOW")) { if(G.transfer_win) { WindowToFront(G.transfer_win); ActivateWindow(G.transfer_win); } snprintf(out,size,"SHOWN"); return 0; }
+    }
     if(!strcmp(verb,"HELP")) snprintf(out,size,"CAPABILITIES STATUS DOCKSTATUS SERVERSTATUS SERVERS SERVER ROOMS CONNECT DISCONNECT GETCONFIG SETCONFIG SAVE RELOAD DRAFT INSERT SEND OPENROOM NEWDIRECT NEWCHANNEL PLUGINS PLUGIN SUBSCRIBE UNSUBSCRIBE SHOW HIDE ICONIFY PREFERENCES QUIT");
     else if(!strcmp(verb,"CAPABILITIES")) snprintf(out,size,"protocol=2 notifications=1,2 snapshot=DOCKSTATUS rooms=ROOMS connection_control=1 unread_scope=all_subscriptions message_scope=last_opened_room_per_server notification_limit=16 subscriber_limit=8 per_subscriber_limit=2");
     else if(!strcmp(verb,"CONNECT") || !strcmp(verb,"DISCONNECT")) return control_connection(verb,rest,out,size);

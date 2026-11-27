@@ -21,7 +21,8 @@ static const char *dock_server_state(int slot)
 {
     const ServerState *s=&G.servers[slot]; int busy=slot==G.active_server?G.busy:s->busy;
     int connected=slot==G.active_server?G.connected:s->connected;
-    if(s->reconnecting) return "reconnecting";
+    if(s->cooling && s->retry_until>amiga_local_ms()) return "cooldown";
+    if(s->reconnecting || s->health_retry) return "reconnecting";
     if(busy) return "connecting";
     if(s->last_error) return "failed";
     return connected?"connected":"offline";

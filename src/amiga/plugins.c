@@ -35,7 +35,8 @@ int plugins_sync(const Prefs *p)
         snprintf(enabled,sizeof(enabled),"plugin.%s.enabled",ids[n]);
         if (strcmp(prefs_extra(p,enabled,"0"),"1")) continue;
         if (!p->extra[i].value[0]) continue;
-        snprintf(paths[n],sizeof(paths[n]),"%s",p->extra[i].value); n++;
+        if(prefs_resource_path(p,p->extra[i].value,paths[n],sizeof(paths[n]))<0)continue;
+        n++;
     }
     if (n!=count) changed=1;
     for (i=0;i<n && !changed;i++) if (strcmp(ids[i],slots[i].id)||strcmp(paths[i],slots[i].path)) changed=1;

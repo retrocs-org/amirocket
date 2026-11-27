@@ -27,5 +27,6 @@
   "Rexx/connection.rexx": "sdk/rexx/connection.rexx",
   "Rexx/low-memory.rexx": "sdk/rexx/low-memory.rexx",
   "Rexx/quick-reply.rexx": "sdk/rexx/quick-reply.rexx",
-  "scripts/Install-AmiRocket": "installer/Install-AmiRocket"
+  "scripts/Install-AmiRocket": "installer/Install-AmiRocket",
+  "Sounds/Notification.8svx": "assets/sounds/Notification.8svx"
 }

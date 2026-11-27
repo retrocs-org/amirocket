@@ -23,8 +23,9 @@ separate Preferences, plugins and ARexx dock integration.
 
 INSTALLATION
 Unpack {archive_name}, open the AmiRocket drawer and double-click Install.
-Choose install/update and the parent drawer. AmiRocketPrefs stays beside
-the client. Existing ENVARC:AmiRocket.prefs and custom plugins are preserved.
+Novice mode detects installed copies and offers Update or Uninstall. New
+installs use SYS:Utilities. Advanced modes allow another drawer.
+AmiRocketPrefs stays beside the client. Existing ENVARC:AmiRocket.prefs and custom plugins are preserved.
 Launch the client from Workbench. Close the client and Preferences before updating.
 Existing copies offer Update or Uninstall. Uninstall lets you keep settings
 (default) or remove the shared configuration. Custom files/plugins are kept.

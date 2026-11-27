@@ -1,0 +1,7 @@
+{
+  "name": "AmiRocket two-hour authenticated release soak",
+  "application": "AmiRocket:AmiRocket-GUIQA",
+  "arguments": ["SOAK=7200"],
+  "timeoutSeconds": 7700,
+  "expectedReturnCode": 0
+}

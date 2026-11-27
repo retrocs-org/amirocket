@@ -19,6 +19,7 @@ typedef struct {
     Buf   body;
     char  content_type[64];
     char  location[2048];
+    int retry_after;
     ar_ms date_ms;         /* parsed Date header, 0 if absent */
 } HttpResponse;
 
@@ -38,11 +39,26 @@ typedef struct {
     char  user_agent[64];
     int (*progress)(void *ctx,size_t received,size_t total); /* nonzero cancels */
     void *progress_ctx;
-    size_t received,total,transfer_limit;
+    size_t received,total,transfer_limit,body_received;
+    int stream_body;
+    int (*body_write)(void *ctx,const void *data,size_t size);
+    void *body_write_ctx;
     int cancelled;
     size_t sent;          /* bytes written in this attempt; nonzero may have committed a POST */
     size_t max_body;       /* responses larger than this are rejected */
     char  err[256];
+
+    /* Optional platform scheduler, called for every wire attempt (including stale GET recovery). */
+    int (*before_request)(void *ctx);
+    void (*after_request)(void *ctx,int status,int retry_after);
+    void *scheduler_ctx;
+    ar_ms (*wall_clock)(void *ctx); /* fallback for Retry-After date without Date */
+    int deferred;
+    int (*upload_read)(void *ctx,void *buffer,int count);
+    void *upload_ctx;
+    size_t upload_length;
+    int upload_done;
+    const char *upload_type;
 
     /* statistics */
     unsigned long n_requests;

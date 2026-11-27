@@ -20,6 +20,7 @@
 #include <string.h>
 #include <unistd.h>
 
+static int cli_upload_read(void *ctx,void *buffer,int count) { size_t n=fread(buffer,1,count,(FILE *)ctx); return ferror((FILE *)ctx)?-1:(int)n; }
 static int g_latin1;    /* -L: print through the Amiga conversion path */
 
 static void usage(void)
@@ -40,7 +41,11 @@ static void usage(void)
         "  history ROOM [N]         last N messages (default 20)\n"
         "  older ROOM BEFORE [N]    messages before an ISO timestamp\n"
         "  download URL FILE        save a same-origin attachment\n"
+        "  search ROOM QUERY [OFFSET] search 25 messages\n"
+        "  upload ROOM FILE         stream and confirm an attachment\n"
         "  send ROOM TEXT...        send a message\n"
+        "  send-id ROOM ID TEXT...  send with a stable delivery ID\n"
+        "  confirm-id ROOM ID TEXT... check an earlier delivery\n"
         "  watch ROOM [SECS] [N]    poll every SECS seconds (default 5), N cycles (0=forever)\n");
 }
 
@@ -245,12 +250,41 @@ int main(int argc, char **argv)
             else { if (fwrite(data.data, 1, data.len, f) != data.len) ret = 1; if (fclose(f)) ret = 1; }
         }
         buf_free(&data);
-    } else if (!strcmp(cmd, "send")) {
+    } else if(!strcmp(cmd,"search") || !strcmp(cmd,"upload")) {
+        const RcRoom *room;
+        if(optind+1>=argc || !(room=sess_find_room(&s,argv[optind]))) { ret=64; goto done; }
+        if(!strcmp(cmd,"search")) {
+            RcMsgList results; int total=0,i; rc_msglist_init(&results);
+            rc=rc_search(&s.rc,room->rid,argv[optind+1],optind+2<argc?atoi(argv[optind+2]):0,25,&results,&total);
+            if(rc==RC_OK) { printf("total=%d\n",total); for(i=0;i<results.count;i++) print_msg(&results.items[i]); }
+            else ret=fail(&s,rc);
+            rc_msglist_free(&results);
+        } else {
+            const char *path=argv[optind+1],*name=strrchr(path,'/'); FILE *f=fopen(path,"rb"); long length; char id[96];
+            if(!f) { ret=1; goto done; }
+            if(fseek(f,0,SEEK_END) || (length=ftell(f))<0 || fseek(f,0,SEEK_SET)) { fclose(f); ret=1; goto done; }
+            rc=rc_upload(&s.rc,room->rid,name?name+1:path,(size_t)length,cli_upload_read,f,id); fclose(f);
+            if(rc==RC_OK) rc=rc_upload_confirm(&s.rc,room->rid,id);
+            if(rc!=RC_OK) ret=fail(&s,rc); else printf("Attachment sent\n");
+        }
+    } else if(!strcmp(cmd,"thread") || !strcmp(cmd,"threadsend") || !strcmp(cmd,"edit") || !strcmp(cmd,"delete") || !strcmp(cmd,"react")) {
+        const RcRoom *room; RcMsgList result; int total=0,i; rc_msglist_init(&result);
+        if(optind+1>=argc || !(room=sess_find_room(&s,argv[optind]))) { ret=64; goto done; }
+        if(!strcmp(cmd,"thread")) rc=rc_thread(&s.rc,argv[optind+1],optind+2<argc?atoi(argv[optind+2]):0,&result,&total);
+        else if(!strcmp(cmd,"delete")) rc=rc_message_delete(&s.rc,room->rid,argv[optind+1]);
+        else if(optind+2>=argc) rc=RC_ERR_ARGS;
+        else if(!strcmp(cmd,"edit")) rc=rc_message_edit(&s.rc,room->rid,argv[optind+1],argv[optind+2],&result);
+        else if(!strcmp(cmd,"threadsend")) rc=rc_send_thread(&s.rc,room->rid,argv[optind+1],argv[optind+2],&result);
+        else rc=rc_message_react(&s.rc,argv[optind+1],argv[optind+2],optind+3<argc?atoi(argv[optind+3]):1);
+        if(rc==RC_OK) { printf("success total=%d\n",total); for(i=0;i<result.count;i++) print_msg(&result.items[i]); }
+        else ret=fail(&s,rc);
+        rc_msglist_free(&result);
+    } else if (!strcmp(cmd, "send") || !strcmp(cmd,"send-id") || !strcmp(cmd,"confirm-id")) {
         const RcRoom *r;
         Buf text;
         RcMsgList echo;
-        int i;
-        if (optind + 1 >= argc) {
+        int i,first=optind+(!strcmp(cmd,"send")?1:2);
+        if (first >= argc) {
             usage();
             ret = 64;
             goto done;
@@ -262,13 +296,13 @@ int main(int argc, char **argv)
             goto done;
         }
         buf_init(&text);
-        for (i = optind + 1; i < argc; i++) {
-            if (i > optind + 1)
+        for (i = first; i < argc; i++) {
+            if (i > first)
                 buf_putc(&text, ' ');
             buf_puts(&text, argv[i]);
         }
         rc_msglist_init(&echo);
-        rc = rc_send(&s.rc, r->rid, buf_str(&text), &echo);
+        rc=!strcmp(cmd,"send")?rc_send(&s.rc,r->rid,buf_str(&text),&echo):!strcmp(cmd,"send-id")?rc_send_id(&s.rc,r->rid,buf_str(&text),argv[optind+1],&echo):rc_confirm_send(&s.rc,r->rid,buf_str(&text),argv[optind+1],&echo);
         buf_free(&text);
         if (rc != RC_OK)
             ret = fail(&s, rc);

@@ -15,6 +15,8 @@
 #include "../src/core/session.h"
 #include "../src/core/timeutil.h"
 #include "../src/core/url.h"
+#include "../src/core/traffic.h"
+#include "../src/core/drafts.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -334,6 +336,151 @@ static void wire_response(ApiWire *w, int status, const char *type, const void *
     buf_append(&w->response, body, len);
 }
 
+
+typedef struct { ArTraffic traffic; ar_ms now; } TrafficClock;
+static int test_gate(void *ctx)
+{
+    TrafficClock *c=ctx;
+    if(c->traffic.cooldown>c->now) return -1;
+    c->now+=traffic_wait(&c->traffic,c->now); traffic_start(&c->traffic,c->now); return 0;
+}
+static void test_result(void *ctx,int status,int retry)
+{ TrafficClock *c=ctx; traffic_result(&c->traffic,c->now,status,retry); }
+static void test_traffic(void)
+{
+    ArTraffic t; TrafficClock clock; ApiWire w={0}; NetIface net={&w,wire_connect}; HttpClient c; HttpResponse r;
+    ar_ms date= http_date_to_ms("Mon, 23 Nov 2026 10:00:00 GMT"); int i,before;
+    traffic_init(&t,17); CHECK(t.spacing_ms==1000 && !traffic_wait(&t,100000));
+    traffic_start(&t,100000); CHECK(traffic_wait(&t,100100)==900);
+    traffic_result(&t,100100,429,120); CHECK(t.cooldown==220100 && t.limited==1 && t.errors==1);
+    CHECK(traffic_wait(&t,200000)==20100);
+    traffic_result(&t,220100,200,0); CHECK(t.failures==0 && t.last_status==200);
+    for(i=0;i<20;i++) traffic_result(&t,300000,503,0);
+    CHECK(t.cooldown>=600000 && t.cooldown<=675000);
+    CHECK(traffic_retry_after("120",0)==120);
+    CHECK(traffic_retry_after("999999999999999999999",0)==86400);
+    CHECK(!traffic_retry_after("-1",date) && !traffic_retry_after("5oops",date));
+    CHECK(traffic_retry_after("Mon, 23 Nov 2026 10:02:00 GMT",date)==120);
+    CHECK(!traffic_retry_after("Mon, 23 Nov 2026 09:00:00 GMT",date));
+    traffic_init(&t,1); traffic_start(&t,60000); traffic_start(&t,61000);
+    CHECK(traffic_rpm(&t,61000)==2 && traffic_rpm(&t,150000)==1 && !traffic_rpm(&t,180000));
+    /* Release request-rate guard: a saturated mixed workload remains paced
+     * for ten minutes, including explicit server Retry-After cooldowns. */
+    { ar_ms now=60000,previous=0; unsigned long count=0; int paced=1,rate_ok=1;
+      traffic_init(&t,9);
+      for(i=0;i<600;i++) {
+        now+=traffic_wait(&t,now);
+        if(previous && now-previous<1000) paced=0;
+        traffic_start(&t,now); count++;
+        /* Diagnostic buckets include the request at both minute endpoints. */
+        if(traffic_rpm(&t,now)>61) rate_ok=0;
+        if(i==100) { traffic_result(&t,now,429,120); CHECK(traffic_wait(&t,now)>=120000); }
+        else traffic_result(&t,now,200,0);
+        previous=now;
+      }
+      CHECK(paced && rate_ok);
+      CHECK(t.requests==count && now>=778000);
+    }
+    traffic_init(&clock.traffic,123); clock.now=100000;
+    http_init(&c,&net,"example.test",80,0,1);
+    c.before_request=test_gate; c.after_request=test_result; c.scheduler_ctx=&clock;
+    http_response_init(&r); buf_init(&w.response); buf_init(&w.request);
+    buf_puts(&w.response,"HTTP/1.1 429 Slow\r\nRetry-After: 120\r\nDate: Mon, 23 Nov 2026 10:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    CHECK(http_request(&c,"GET","/",NULL,NULL,0,&r)==0 && r.status==429 && r.retry_after==120);
+    CHECK(clock.traffic.cooldown==220000 && clock.traffic.requests==1);
+    before=w.connects; http_response_free(&r); http_response_init(&r);
+    CHECK(http_request(&c,"POST","/send",NULL,"hello",5,&r)==0 && r.status==429);
+    CHECK(w.connects==before && clock.traffic.requests==1); /* no wire send during cooldown */
+    clock.now=220000; wire_response(&w,200,"text/plain","ok",2);
+    http_response_free(&r); http_response_init(&r);
+    CHECK(!http_request(&c,"GET","/",NULL,NULL,0,&r) && r.status==200);
+    CHECK(clock.traffic.requests==2 && !clock.traffic.failures);
+    http_response_free(&r); http_response_init(&r); wire_response(&w,200,"text/plain","ok",2);
+    CHECK(!http_request(&c,"GET","/",NULL,NULL,0,&r) && clock.now==221000);
+    /* A stale persistent GET may recover once without being mistaken for a throttle. */
+    http_response_free(&r); http_response_init(&r); buf_clear(&w.response); w.pos=0;
+    c.connected=1; c.uses=1; c.tr.ctx=&w; c.tr.read=wire_read; c.tr.write=wire_write; c.tr.close=wire_close;
+    w.followup="HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"; w.follow_after=w.connects;
+    before=clock.traffic.requests;
+    CHECK(!http_request(&c,"GET","/safe",NULL,NULL,0,&r) && r.status==200);
+    CHECK(clock.traffic.requests==(unsigned long)before+2 && clock.traffic.cooldown<=clock.now);
+    http_close(&c); http_response_free(&r); buf_free(&w.response); buf_free(&w.request);
+}
+
+
+typedef struct { const unsigned char *bytes; int length,pos; } UploadFile;
+static int test_upload_read(void *ctx,void *buffer,int count)
+{ UploadFile *f=ctx; if(count>f->length-f->pos) count=f->length-f->pos; if(count>0) memcpy(buffer,f->bytes+f->pos,count); f->pos+=count; return count; }
+static int cancel_upload(void *ctx,size_t received,size_t total) { (void)ctx; (void)total; return received>0; }
+static int colliding_upload_read(void *ctx,void *buffer,int count)
+{
+    ApiWire *wire=ctx; const char *start=strstr(buf_str(&wire->request),"boundary="); const char *end;
+    int length; if(!start) return -1; start+=9; end=strstr(start,"\r\n"); if(!end) return -1;
+    length=(int)(end-start); if(count<length+2) return -1;
+    memset(buffer,'x',count); memcpy(buffer,"--",2); memcpy((char *)buffer+2,start,length); return count;
+}
+static int cancel_before_request(void *ctx,size_t received,size_t total) { (void)ctx; (void)received; (void)total; return 1; }
+static void test_search_upload(void)
+{
+    ApiWire w={0}; NetIface net={&w,wire_connect}; RcClient c; RcMsgList results; char id[96]; int total,before;
+    const unsigned char binary[]={0,1,2,255,0,'x'}; UploadFile file={binary,sizeof(binary),0};
+    const char *messages="{\"messages\":[{\"_id\":\"hit\",\"rid\":\"r1\",\"msg\":\"found\",\"u\":{\"username\":\"alice\"}}],\"total\":51,\"success\":true}";
+    buf_init(&w.request); buf_init(&w.response); rc_msglist_init(&results); CHECK(!rc_init(&c,&net,"http://chat.test/sub",0));
+    strcpy(c.user_id,"U"); strcpy(c.token,"T");
+    wire_response(&w,200,"application/json",messages,strlen(messages));
+    CHECK(rc_search(&c,"r1","a & b",25,25,&results,&total)==RC_OK && total==51 && results.count==1);
+    CHECK(strstr(buf_str(&w.request),"GET /sub/api/v1/chat.search?roomId=r1&searchText=a%20%26%20b&offset=25&count=25")!=NULL);
+    rc_msglist_free(&results); before=w.connects;
+    CHECK(rc_search(&c,"r1","query",-1,25,&results,&total)==RC_ERR_ARGS && w.connects==before);
+    { const char *reply="{\"file\":{\"_id\":\"file1\"},\"success\":true}";
+      wire_response(&w,200,"application/json",reply,strlen(reply));
+      CHECK(rc_upload(&c,"r1","test.bin",sizeof(binary),test_upload_read,&file,id)==RC_OK && !strcmp(id,"file1"));
+      CHECK(strstr(buf_str(&w.request),"POST /sub/api/v1/rooms.media/r1 HTTP/1.1")!=NULL);
+      CHECK(strstr(buf_str(&w.request),"Content-Type: multipart/form-data; boundary=AmiRocket")!=NULL);
+      CHECK(strstr(buf_str(&w.request),"X-Auth-Token: T\r\nX-User-Id: U")!=NULL);
+      { const char *start=strstr(buf_str(&w.request),"application/octet-stream\r\n\r\n");
+        CHECK(start && !memcmp(start+strlen("application/octet-stream\r\n\r\n"),binary,sizeof(binary)));
+        CHECK(file.pos==sizeof(binary) && c.http.upload_read==NULL);
+      }
+      wire_response(&w,200,"application/json","{\"success\":true}",16);
+      CHECK(rc_upload_confirm(&c,"r1",id)==RC_OK);
+      CHECK(strstr(buf_str(&w.request),"POST /sub/api/v1/rooms.mediaConfirm/r1/file1 ")!=NULL);
+      before=w.connects;
+      CHECK(rc_upload(&c,"r1","evil\"\r\nInjected: x",6,test_upload_read,&file,id)==RC_ERR_ARGS && w.connects==before);
+      file.pos=0; c.http.progress=cancel_upload; c.http.progress_ctx=NULL;
+      wire_response(&w,200,"application/json",reply,strlen(reply));
+      CHECK(rc_upload(&c,"r1","test.bin",6,test_upload_read,&file,id)==RC_ERR_NET && c.http.cancelled && c.http.upload_read==NULL);
+      c.http.progress=cancel_before_request; c.http.upload_done=1; c.http.sent=12345; before=w.connects;
+      CHECK(rc_upload(&c,"r1","test.bin",6,test_upload_read,&file,id)==RC_ERR_NET && c.http.sent==0 && w.connects==before);
+      c.http.progress=NULL; before=w.connects;
+      wire_response(&w,200,"application/json",reply,strlen(reply));
+      CHECK(rc_upload(&c,"r1","capture.bin",64,colliding_upload_read,&w,id)==RC_ERR_ARGS && strstr(c.err,"delimiter") && w.connects==before+1);
+      wire_response(&w,503,"text/html","busy",4); before=w.connects;
+      CHECK(rc_upload_confirm(&c,"r1","file1")!=RC_OK && w.connects==before+1 && strstr(c.err,"unconfirmed"));
+    }
+    rc_cleanup(&c); rc_msglist_free(&results); buf_free(&w.request); buf_free(&w.response);
+}
+#include "send_delivery.inc"
+static void test_drafts(void)
+{
+    ArDrafts d={0},restored={0}; Buf encoded; int i; char key[32]; const ArDraft *entry;
+    buf_init(&encoded);
+    CHECK(!drafts_set(&d,"server\nuser\nroom","code\n  indentation & \"quotes\"",7));
+    CHECK(!drafts_set(&d,"server\nother\nroom","another account",2));
+    CHECK(!drafts_encode(&d,&encoded) && !drafts_decode(&restored,encoded.data,encoded.len));
+    entry=drafts_get(&restored,"server\nuser\nroom"); CHECK(entry && entry->cursor==7 && !strcmp(entry->text,"code\n  indentation & \"quotes\""));
+    CHECK(drafts_decode(&restored,"{\"version\":2,\"drafts\":[]}",25)<0 && drafts_get(&restored,"server\nuser\nroom"));
+    CHECK(!drafts_set(&restored,"server\nuser\nroom","",0) && !drafts_get(&restored,"server\nuser\nroom"));
+    drafts_free(&restored);
+    for(i=0;i<AR_DRAFT_COUNT;i++) { snprintf(key,sizeof(key),"room-%d",i); CHECK(!drafts_set(&restored,key,"kept",0)); }
+    CHECK(drafts_set(&restored,"extra-room","never evict an existing draft",0)<0);
+    CHECK(drafts_get(&restored,"room-0") && !drafts_set(&restored,"room-0","",0) && !drafts_set(&restored,"extra-room","fits now",0));
+    CHECK(!drafts_pending(&d,"server\nuser\nroom","",0));
+    entry=drafts_get(&d,"server\nuser\nroom"); CHECK(entry && entry->dirty && !entry->text[0]);
+    CHECK(!drafts_encode(&d,&encoded) && !drafts_decode(&restored,encoded.data,encoded.len) && !drafts_get(&restored,"server\nuser\nroom"));
+    drafts_commit(&d,"server\nuser\nroom"); CHECK(!drafts_get(&d,"server\nuser\nroom"));
+    drafts_free(&d); drafts_free(&restored); buf_free(&encoded);
+}
 static void test_http_send_recovery(void)
 {
     ApiWire w={0}; NetIface net={&w,wire_connect}; RcClient c; RcMsgList echo; HttpResponse response;
@@ -380,6 +527,26 @@ static int probe_progress(void *ctx,size_t received,size_t total)
 {
     ProgressProbe *p=ctx; p->received=received; p->total=total; p->calls++;
     return p->cancel_at && received>=p->cancel_at;
+}
+#include "download_fixture.h"
+typedef struct {size_t bytes,largest;int bad;} SinkProbe;
+static int probe_sink(void *ctx,const void *data,size_t size)
+{
+    SinkProbe *p=ctx;size_t i;p->bytes+=size;if(size>p->largest)p->largest=size;
+    for(i=0;i<size;i++)if(((const char *)data)[i]!='x')p->bad=1;
+    return 0;
+}
+static void test_stream_download(void)
+{
+    DownloadWire w;NetIface net={0};RcClient c;SinkProbe p={0};
+    download_wire_init(&w,5UL*1024*1024);net.ctx=&w;net.connect=download_wire_connect;
+    CHECK(rc_init(&c,&net,"http://chat.test",1)==RC_OK);
+    CHECK(rc_download_to(&c,"/large",probe_sink,&p)==RC_OK);
+    CHECK(p.bytes==5UL*1024*1024 && p.largest<=sizeof(c.http.rbuf) && !p.bad);
+    CHECK(!c.http.body_write && !c.http.body_write_ctx);
+    download_wire_init(&w,9UL*1024*1024);memset(&p,0,sizeof(p));
+    CHECK(rc_download_to(&c,"/large",probe_sink,&p)!=RC_OK && p.bytes==0);
+    rc_cleanup(&c);
 }
 static void test_transfer_progress(void)
 {
@@ -450,7 +617,7 @@ static void test_unread_file_metadata(void)
 {
     ApiWire w={0}; NetIface net={&w,wire_connect}; RcClient c; RcRoomList rooms; RcMsgList messages;
     const char *subscriptions="{\"success\":true,\"update\":[{\"rid\":\"r\",\"name\":\"general\",\"unread\":5,\"userMentions\":2,\"groupMentions\":1,\"ls\":{\"$date\":1767225600000}}]}";
-    const char *files="{\"success\":true,\"messages\":[{\"_id\":\"m\",\"u\":{\"username\":\"alice\"},\"attachments\":[{\"title\":\"a.png\",\"image_url\":\"/a\",\"image_size\":2048},{\"title\":\"b\",\"title_link\":\"/b\",\"size\":-5}]}]}";
+    const char *files="{\"success\":true,\"messages\":[{\"_id\":\"m\",\"u\":{\"username\":\"alice\"},\"attachments\":[{\"title\":\"a.png\",\"title_link\":\"/original\",\"image_url\":\"/a\",\"image_size\":2048},{\"title\":\"b\",\"title_link\":\"/b\",\"size\":-5}]}]}";
     buf_init(&w.response); buf_init(&w.request); rc_roomlist_init(&rooms); rc_msglist_init(&messages);
     CHECK(rc_init(&c,&net,"https://chat.test",1)==RC_OK);
     wire_response(&w,200,"application/json",subscriptions,strlen(subscriptions));
@@ -459,6 +626,17 @@ static void test_unread_file_metadata(void)
     wire_response(&w,200,"application/json",files,strlen(files));
     CHECK(rc_history(&c,"r",'c',20,0,&messages)==RC_OK && messages.count==1);
     CHECK(messages.items[0].file_count==2 && messages.items[0].files[0].size==2048 && messages.items[0].files[1].size==0);
+    CHECK(!strcmp(messages.items[0].files[0].url,"/original") && !strcmp(rc_attachment_preview_url(&messages.items[0].files[0]),"/a"));
+    CHECK(!strcmp(rc_attachment_preview_url(&messages.items[0].files[1]),"/b"));
+    { Buf preview; buf_init(&preview);
+      wire_response(&w,200,"image/png","tiny",4);
+      CHECK(rc_download(&c,rc_attachment_preview_url(&messages.items[0].files[0]),&preview)==RC_OK && preview.len==4);
+      CHECK(strstr(buf_str(&w.request),"GET /a HTTP/1.1")!=NULL);
+      buf_free(&preview); wire_response(&w,200,"application/octet-stream","original",8); buf_init(&preview);
+      CHECK(rc_download(&c,messages.items[0].files[0].url,&preview)==RC_OK && preview.len==8);
+      CHECK(strstr(buf_str(&w.request),"GET /original HTTP/1.1")!=NULL); buf_free(&preview);
+    }
+
     rc_roomlist_free(&rooms); rc_msglist_free(&messages); rc_cleanup(&c); buf_free(&w.response); buf_free(&w.request);
 }
 
@@ -572,12 +750,15 @@ static void test_dock_protocol(void)
     CHECK(!ar_rexx_event2("AMIROCKET_EVENT MESSAGE \"r\" \"u\" \"text\"",&e));
 }
 
+#include "test_realtime.inc"
+
 int run_core_tests(void (*log)(const char *))
 {
     char b[96];
 
     g_log = log;
     g_fail = g_pass = 0;
+    test_realtime();
     test_buf();
     test_json();
     test_url();
@@ -590,8 +771,11 @@ int run_core_tests(void (*log)(const char *))
     test_unread_file_metadata();
     test_create_conversations();
     test_dock_protocol();
-    test_transfer_progress();
-    test_http_send_recovery();
+    test_transfer_progress();test_stream_download();
+    test_http_send_recovery();test_send_delivery_ids();
+    test_traffic();
+    test_search_upload();
+    test_drafts();
     test_poll_recovery();
     snprintf(b, sizeof(b), "core tests: %d passed, %d failed\n", g_pass, g_fail);
     log(b);

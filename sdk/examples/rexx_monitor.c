@@ -18,11 +18,14 @@ static unsigned long poll_count,request_poll[2];
 static int available=-1;
 static unsigned long last_sequence;
 #ifdef AR_MONITOR_QA
+#include "../../tools/qa_observation.h"
 /* Test-only observation files are closed immediately: the harness never reads
  * a log stream still owned by the child process. All protocol code is shared. */
 static void qa_report(const char *path,const char *text)
 {
-    BPTR f=Open(path,MODE_NEWFILE); if(f) { Write(f,(APTR)text,strlen(text)); Close(f); }
+    BPTR f; if(!qa_observation_take()) return;
+    f=Open(path,MODE_NEWFILE); if(f) { Write(f,(APTR)text,strlen(text)); Close(f); }
+    qa_observation_release();
 }
 #else
 #define qa_report(path,text) ((void)0)

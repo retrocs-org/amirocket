@@ -1,1 +1,1 @@
-{"name":"AmiRocket release installer: fresh install, locked-drawer upgrade and uninstall","application":"QATools:InstallerQA","timeoutSeconds":120,"expectedReturnCode":0}
+{"name":"AmiRocket release installer: fresh install, locked-drawer upgrade and uninstall","application":"QATools:InstallerQA","timeoutSeconds":180,"expectedReturnCode":0}

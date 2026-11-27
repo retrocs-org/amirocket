@@ -4,6 +4,11 @@
 #include <exec/types.h>
 #include <exec/execbase.h>
 #include <dos/dos.h>
+#include <dos/var.h>
+#include <dos/dostags.h>
+#include "../src/amiga/prefs.h"
+#include "../src/core/mem.h"
+#include "../src/core/util.h"
 #include <workbench/workbench.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
@@ -34,21 +39,254 @@ static int icon(const char *name,int type)
     d=GetDefDiskObject(type); if(!d)return 0;
     d->do_StackSize=65536; ok=PutDiskObject((STRPTR)name,d)!=0; FreeDiskObject(d);return ok;
 }
-int main(int argc,char **argv)
+/* Missing assigns and stale removable volumes are normal discovery misses. */
+static BPTR quiet_lock(const char *path)
+{
+    struct Process *process=(struct Process *)FindTask(NULL);
+    APTR saved=process->pr_WindowPtr;BPTR result;
+    process->pr_WindowPtr=(APTR)-1;
+    result=Lock((STRPTR)path,ACCESS_READ);
+    process->pr_WindowPtr=saved;
+    return result;
+}
+/* Export only a validated install drawer, never settings or account data. */
+static int installed(const char *path,char *out,int size,int exclude_source)
+{
+    BPTR dir,file;char app[512];int ok=0;struct FileInfoBlock *fib;
+    if(!path||!path[0]||strlen(path)>400||strpbrk(path,"\"*\r\n"))return 0;
+    dir=quiet_lock(path);if(!dir)return 0;
+    fib=AllocDosObject(DOS_FIB,NULL);
+    if(!fib){UnLock(dir);return 0;}
+    if(!Examine(dir,fib) || fib->fib_DirEntryType<=0){FreeDosObject(DOS_FIB,fib);UnLock(dir);return 0;}
+    FreeDosObject(DOS_FIB,fib);
+    if(exclude_source&&SameLock(dir,GetProgramDir())==LOCK_SAME){UnLock(dir);return 0;}
+    if(NameFromLock(dir,out,size)){
+        ar_strlcpy(app,out,sizeof(app));file=AddPart(app,"AmiRocket",sizeof(app))?quiet_lock(app):0;
+        if(file){
+            /* A leftover application drawer is not an installed executable. */
+            fib=AllocDosObject(DOS_FIB,NULL);
+            if(fib){ok=Examine(file,fib) && fib->fib_DirEntryType<0;FreeDosObject(DOS_FIB,fib);}
+            UnLock(file);
+        }
+    }
+    UnLock(dir);return ok;
+}
+static int location(const char *path,int record,const char *prefsdir)
+{
+    Prefs *p;char out[512];int rc,i,ok=0;
+    const char *fallback[]={"SYS:Utilities","SYS:Utilities/AmiRocket","SYS:Tools/AmiRocket","SYS:Applications/AmiRocket","AmiRocket:",NULL};
+    if(ar_mem_init()<0)return 20;
+    p=ar_malloc(sizeof(*p));if(!p){ar_mem_cleanup();return 20;}
+    rc=prefs_load(p);
+    if(rc==-2)goto done;
+    if(rc<0){char selected[512]; BPTR existing; if(prefs_config_file(selected,sizeof(selected))<0)goto done; existing=quiet_lock(selected);
+        if(!existing)existing=Lock("ENV:AmiRocket.prefs",ACCESS_READ);
+        if(existing){UnLock(existing);goto done;} /* Never replace unreadable settings. */
+    }
+    if(record){
+        char previous[512],sound[512];
+        int bundled=!p->notification_sound[0] || !strcmp(p->notification_sound,"PROGDIR:Sounds/Notification.8svx");
+        ar_strlcpy(previous,prefs_extra(p,"workspace.install_dir",""),sizeof(previous));
+        if(previous[0] && AddPart(previous,"Sounds/Notification.8svx",sizeof(previous)) && !strcmp(previous,p->notification_sound))bundled=1;
+        if(installed(path,out,sizeof(out),0)&&strlen(out)<=255&&prefs_set(p,"workspace.install_dir",out)==0) {
+            if(prefsdir && (strlen(prefsdir)>255 || strpbrk(prefsdir,"\"*\r\n") || prefs_set(p,"workspace.prefs_dir",prefsdir)<0)) goto done;
+            if(bundled) {
+                ar_strlcpy(sound,prefs_extra(p,"workspace.data_dir",out),sizeof(sound));
+                if(!AddPart(sound,"Sounds/Notification.8svx",sizeof(sound)))goto done;
+                if(prefs_set(p,"notification_sound",strlen(sound)<sizeof(p->notification_sound)?sound:"PROGDIR:Sounds/Notification.8svx")<0)goto done;
+            }
+            if(prefs_save(p)==0)ok=1;
+        }
+    }else{
+        char selected[512],drawer[512],*part;
+        const char *pref=prefs_extra(p,"workspace.prefs_dir","SYS:Prefs");
+        prefs_config_file(selected,sizeof(selected));
+        { const char *data=prefs_extra(p,"workspace.data_dir","");SetVar("AmiRocket-DataDir",data,strlen(data),GVF_GLOBAL_ONLY); }
+        { char previous_cache[512];const char *cache=p->cache_dir;
+          ar_strlcpy(previous_cache,prefs_extra(p,"workspace.data_dir",prefs_extra(p,"workspace.install_dir","")),sizeof(previous_cache));
+          if(previous_cache[0] && AddPart(previous_cache,"Cache",sizeof(previous_cache)) && !ar_strcasecmp(previous_cache,cache))cache="";
+          SetVar("AmiRocket-CacheDir",cache,strlen(cache),GVF_GLOBAL_ONLY);
+        }
+        SetVar("AmiRocket-DownloadDir",p->download_dir,strlen(p->download_dir),GVF_GLOBAL_ONLY);
+        SetVar("AmiRocket-ConfigFile",selected,strlen(selected),GVF_GLOBAL_ONLY);
+        ar_strlcpy(drawer,selected,sizeof(drawer)); part=FilePart(drawer); *part=0;
+        SetVar("AmiRocket-ConfigDir",drawer,strlen(drawer),GVF_GLOBAL_ONLY);
+        DeleteVar("AmiRocket-InstallDir",GVF_GLOBAL_ONLY);
+        DeleteVar("AmiRocket-PrefsDir",GVF_GLOBAL_ONLY);
+        if(strlen(pref)<256 && !strpbrk(pref,"\"*\r\n")) SetVar("AmiRocket-PrefsDir",pref,strlen(pref),GVF_GLOBAL_ONLY);
+        ok=installed(prefs_extra(p,"workspace.install_dir",""),out,sizeof(out),0);
+        for(i=0;!ok&&fallback[i];i++)ok=installed(fallback[i],out,sizeof(out),1);
+        if(ok)ok=SetVar("AmiRocket-InstallDir",out,strlen(out),GVF_GLOBAL_ONLY)!=0;
+        else ok=1; /* No installed copy: the installer uses its default drawer. */
+    }
+done:
+    memset(p,0,sizeof(*p));ar_free(p);ar_mem_cleanup();return ok?0:20;
+}
+static int config_location(const char *path)
+{
+    Prefs *p; char old[512]; int rc=20,loaded; BPTR a,b;
+    if(!path || !*path) return 0;
+    { char current[512]; if(prefs_config_file(current,sizeof(current))<0) return 20; if(!strcmp(path,current)) return 0; }
+    if(ar_mem_init()<0) return 20;
+    p=ar_malloc(sizeof(*p)); if(!p) { ar_mem_cleanup(); return 20; }
+    if(prefs_config_file(old,sizeof(old))<0) goto done;
+    a=quiet_lock(old); b=quiet_lock(path);
+    if(b && (!a || SameLock(a,b)!=LOCK_SAME)) { if(a)UnLock(a);UnLock(b);goto done; }
+    if(a)UnLock(a);
+    if(b)UnLock(b);
+    loaded=prefs_load(p);
+    if(loaded<0) { a=quiet_lock(old); if(a) {UnLock(a);goto done;} }
+    if(loaded==-2 || prefs_config_override(path)<0) goto done;
+    if(prefs_save(p)<0) goto done;
+    if(!SetVar("AmiRocket-ConfigFile",path,strlen(path),GVF_GLOBAL_ONLY|GVF_SAVE_VAR)) goto done;
+    a=quiet_lock(old); b=quiet_lock(path);
+    if(a && b && SameLock(a,b)!=LOCK_SAME) { UnLock(a); a=0; DeleteFile(old); }
+    if(a) UnLock(a);
+    if(b)UnLock(b);
+    if(strcmp(path,"ENV:AmiRocket.prefs")) DeleteFile("ENV:AmiRocket.prefs");
+    rc=0;
+done:
+    memset(p,0,sizeof(*p));ar_free(p);ar_mem_cleanup();return rc;
+}
+/* Resolve the existing parent before comparing destinations, including assigns. */
+static int data_path(const char *path,char *out,int size)
+{
+    BPTR lock;char parentdir[512],leaf[256];int ok;
+    if(!path || !strchr(path,':') || strlen(path)>240 || strpbrk(path,"\"*\r\n"))return 0;
+    lock=quiet_lock(path);
+    if(lock){struct FileInfoBlock *f=AllocDosObject(DOS_FIB,NULL);ok=f && Examine(lock,f) && f->fib_DirEntryType>0 && f->fib_DirEntryType!=ST_SOFTLINK && NameFromLock(lock,out,size);if(f)FreeDosObject(DOS_FIB,f);UnLock(lock);return ok;}
+    ar_strlcpy(parentdir,path,sizeof(parentdir));ar_strlcpy(leaf,FilePart(parentdir),sizeof(leaf));*FilePart(parentdir)=0;
+    lock=quiet_lock(parentdir);if(!lock)return 0;ok=NameFromLock(lock,out,size);UnLock(lock);
+    return ok && AddPart(out,leaf,size);
+}
+static int path_under(const char *path,const char *root)
+{
+    int n=strlen(root);return !ar_strncasecmp(path,root,n) && (!path[n] || root[n-1]==':' || path[n]=='/');
+}
+/* Copy private custom resources without overwriting an existing destination. */
+static int data_copy(const char *from,const char *to,int depth)
+{
+    BPTR lock=quiet_lock(from),dest=0,input=0,output=0;struct FileInfoBlock *fib;int ok=1;LONG n;char chunk[2048];
+    if(!lock)return IoErr()==ERROR_OBJECT_NOT_FOUND || IoErr()==ERROR_DIR_NOT_FOUND;
+    if(depth>16){UnLock(lock);return 0;}
+    fib=AllocDosObject(DOS_FIB,NULL);if(!fib){UnLock(lock);return 0;}
+    if(!Examine(lock,fib) || fib->fib_DirEntryType==ST_SOFTLINK)ok=0;
+    else if(fib->fib_DirEntryType>0){
+        dest=quiet_lock(to);if(!dest)dest=CreateDir(to);if(!dest)ok=0;else UnLock(dest);
+        while(ok && ExNext(lock,fib)){
+            char a[512],b[512];ar_strlcpy(a,from,sizeof(a));ar_strlcpy(b,to,sizeof(b));
+            ok=AddPart(a,fib->fib_FileName,sizeof(a)) && AddPart(b,fib->fib_FileName,sizeof(b)) && data_copy(a,b,depth+1);
+        }
+        if(ok && IoErr()!=ERROR_NO_MORE_ENTRIES)ok=0;
+    }else{
+        dest=quiet_lock(to);
+        if(dest)UnLock(dest);
+        else {
+            input=Open(from,MODE_OLDFILE);output=input?Open(to,MODE_NEWFILE):0;ok=input && output;
+            if(ok){while((n=Read(input,chunk,sizeof(chunk)))>0)if(Write(output,chunk,n)!=n){ok=0;break;}if(n<0)ok=0;}
+            if(input)Close(input);
+            if(output && !Close(output))ok=0;
+            if(!ok)DeleteFile(to);
+        }
+    }
+    FreeDosObject(DOS_FIB,fib);UnLock(lock);return ok;
+}
+static int data_location(const char *path,const char *appdir,const char *prefdir,int check)
+{
+    char target[512],app[512],pref[512],package[512],old[512],a[512],b[512];Prefs *p;int i,rc=20;
+    const char *resources[]={"Plugins","Sounds","Rexx","licenses","AmiRocket.drafts","AmiRocket.drafts.bak",NULL};
+    if(!data_path(path,target,sizeof(target)) || !data_path(appdir,app,sizeof(app)) || !data_path(prefdir,pref,sizeof(pref)) || !NameFromLock(GetProgramDir(),package,sizeof(package)) || !*FilePart(target))return 20;
+    if(path_under(target,app) || path_under(target,pref) || path_under(target,package) || path_under(app,target) || path_under(pref,target))return 20;
+    if(check)return 0;
+    if(ar_mem_init()<0)return 20;
+    p=ar_calloc(1,sizeof(*p));if(!p){ar_mem_cleanup();return 20;}
+    { int loaded=prefs_load(p);char selected[512];BPTR existing;
+      if(loaded==-2)goto done;
+      if(loaded<0){if(prefs_config_file(selected,sizeof(selected))<0)goto done;existing=quiet_lock(selected);if(existing){UnLock(existing);goto done;}}
+    }
+    ar_strlcpy(old,prefs_extra(p,"workspace.data_dir",prefs_extra(p,"workspace.install_dir","")),sizeof(old));
+    { BPTR previous=old[0]?quiet_lock(old):0;if(previous)UnLock(previous);else old[0]=0; }
+    if(old[0] && ar_strcasecmp(old,target)){
+        if(path_under(target,old) || path_under(old,target))goto done;
+        for(i=0;resources[i];i++){
+            ar_strlcpy(a,old,sizeof(a));ar_strlcpy(b,target,sizeof(b));
+            if(!AddPart(a,resources[i],sizeof(a)) || !AddPart(b,resources[i],sizeof(b)) || !data_copy(a,b,0))goto done;
+        }
+        /* Retarget configured plugin paths only within the previous Plugins drawer. */
+        ar_strlcpy(a,old,sizeof(a));AddPart(a,"Plugins",sizeof(a));
+        for(i=0;i<p->extra_count;i++)if(!strncmp(p->extra[i].key,"plugin.",7) && path_under(p->extra[i].value,a)){
+            snprintf(b,sizeof(b),"%s%s",target,p->extra[i].value+strlen(old));
+            if(strlen(b)>=sizeof(p->extra[i].value))goto done;
+            ar_strlcpy(p->extra[i].value,b,sizeof(p->extra[i].value));
+        }
+        ar_strlcpy(a,old,sizeof(a));AddPart(a,"Sounds/Notification.8svx",sizeof(a));
+        if(!strcmp(a,p->notification_sound)){ar_strlcpy(b,target,sizeof(b));AddPart(b,"Sounds/Notification.8svx",sizeof(b));if(prefs_set(p,"notification_sound",b)<0)goto done;}
+    }
+    ar_strlcpy(a,old,sizeof(a));if(a[0])AddPart(a,"Cache",sizeof(a));
+    if(!p->cache_dir[0] || !strcmp(p->cache_dir,"PROGDIR:Cache") || (a[0] && !ar_strcasecmp(a,p->cache_dir))){
+        BPTR cache;ar_strlcpy(b,target,sizeof(b));if(!AddPart(b,"Cache",sizeof(b)) || prefs_set(p,"cache_dir",b)<0)goto done;
+        cache=quiet_lock(b);if(!cache)cache=CreateDir(b);if(!cache)goto done;UnLock(cache);
+    }
+    if(prefs_set(p,"workspace.data_dir",target)==0 && prefs_save(p)==0)rc=0;
+done:memset(p,0,sizeof(*p));ar_free(p);ar_mem_cleanup();return rc;
+}
+static int helper_main(int argc,char **argv)
 {
     char app[512],prefs[512]; int ok=0; struct DiskObject *d;
+    if(argc==5 && (same(argv[2],"DATA") || same(argv[2],"DATA-CHECK")))return data_location(argv[1],argv[3],argv[4],same(argv[2],"DATA-CHECK"));
+    if(argc==4 && (same(argv[2],"DIRECTORIES") || same(argv[2],"DIRECTORIES-CHECK"))) {
+        Prefs *settings;int rc=20;
+        if(ar_mem_init()<0)return 20;
+        settings=ar_calloc(1,sizeof(*settings));
+        if(settings) {prefs_load(settings);
+            if(!prefs_set(settings,"cache_dir",argv[1]) && !prefs_set(settings,"download_dir",argv[3]) && (same(argv[2],"DIRECTORIES-CHECK") || !prefs_save(settings)))rc=0;
+            memset(settings,0,sizeof(*settings));ar_free(settings);
+        } ar_mem_cleanup();return rc;
+    }
+    if(argc==3 && same(argv[2],"CONFIG"))return config_location(argv[1]);
     if(argc==2 && same(argv[1],"CHECK")) return running()?5:0;
-    if(argc<2 || argc>3 || strlen(argv[1])>400 || !strchr(argv[1],':') || strpbrk(argv[1],"\"*\r\n")) return 20;
-    snprintf(app,sizeof(app),"%s/AmiRocket",argv[1]); snprintf(prefs,sizeof(prefs),"%s/AmiRocketPrefs",argv[1]);
+    if(argc==2 && same(argv[1],"DETECT"))return location(NULL,0,NULL);
+    if((argc==3 || argc==4) && same(argv[2],"RECORD"))return location(argv[1],1,argc==4?argv[3]:NULL);
+    if(argc<2 || argc>4 || strlen(argv[1])>400 || !strchr(argv[1],':') || strpbrk(argv[1],"\"*\r\n")) return 20;
+    ar_strlcpy(app,argv[1],sizeof(app));ar_strlcpy(prefs,argc==4?argv[3]:argv[1],sizeof(prefs));
+    if(!AddPart(app,"AmiRocket",sizeof(app)) || !AddPart(prefs,"AmiRocketPrefs",sizeof(prefs)))return 20;
+    if(argc==4 && (strlen(argv[3])>400 || !strchr(argv[3],':') || strpbrk(argv[3],"\"*\r\n"))) return 20;
     IconBase=OpenLibrary("icon.library",39); if(!IconBase)return 20;
     if(argc==3 && same(argv[2],"REMOVE-STARTUP")) {
         /* Cleanup only for entries made by older installers. Never create one. */
         const char *name="SYS:WBStartup/AmiRocketStart";
         d=GetDiskObject((STRPTR)name);ok=1;
         if(d) { if(same(d->do_DefaultTool,app)) { ok=DeleteDiskObject((STRPTR)name)!=0; if(ok)DeleteFile((STRPTR)name); } FreeDiskObject(d); }
-    } else if(argc==2 || (argc==3 && same(argv[2],"ICONS"))) {
-        ok=icon(argv[1],WBDRAWER)&&icon(app,WBTOOL)&&icon(prefs,WBTOOL);
+    } else if(argc==3 && same(argv[2],"START")) {
+        BPTR input=Open("NIL:",MODE_OLDFILE),output=Open("NIL:",MODE_NEWFILE); char command[520]; LONG rc=-1;
+        snprintf(command,sizeof(command),"\"%s\"",app);
+        if(input && output) rc=SystemTags(command,SYS_Asynch,TRUE,SYS_UserShell,TRUE,SYS_Input,input,SYS_Output,output,NP_StackSize,131072,TAG_END);
+        if(rc<0) {if(input)Close(input);if(output)Close(output);} ok=rc>=0;
+    } else if(argc==4 && same(argv[2],"CLEAN-LEGACY")) {
+        BPTR a=quiet_lock(argv[1]),b=quiet_lock(argv[3]);
+        const char *old[]={"Install","Install.info","scripts/Install-AmiRocket","AmiRocketPrefs","AmiRocketPrefs.info",NULL}; int i;
+        ok=a && b; if(ok) for(i=0;old[i];i++) {
+            char name[512]; BPTR f;
+            if(i>=3 && SameLock(a,b)==LOCK_SAME)continue;
+            ar_strlcpy(name,argv[1],sizeof(name));if(!AddPart(name,old[i],sizeof(name))){ok=0;break;}f=quiet_lock(name);
+            if(f) {UnLock(f);if(!DeleteFile(name))ok=0;}
+        }
+        if(a)UnLock(a);
+    if(b)UnLock(b);
+    } else if(argc==2 || ((argc==3 || argc==4) && same(argv[2],"ICONS"))) {
+        ok=icon(app,WBTOOL)&&icon(prefs,WBTOOL);
     }
 
     CloseLibrary(IconBase);return ok?0:20;
+}
+
+/* prefs_load uses a bounded 32 KiB parser buffer; use a known stack even from Installer. */
+static struct Task *parent;static BYTE sig;static int result,helper_argc;static char **helper_argv;
+static void helper_entry(void){result=helper_main(helper_argc,helper_argv);Forbid();Signal(parent,1UL<<sig);}
+int main(int argc,char **argv)
+{
+    struct Process *child;parent=FindTask(NULL);sig=AllocSignal(-1);if(sig<0)return 20;
+    helper_argc=argc;helper_argv=argv;
+    child=CreateNewProcTags(NP_Entry,(ULONG)helper_entry,NP_StackSize,131072,NP_Name,(ULONG)"AmiRocket installer helper",NP_Input,Input(),NP_Output,Output(),NP_CloseInput,FALSE,NP_CloseOutput,FALSE,TAG_END);
+    if(!child){FreeSignal(sig);return 20;}Wait(1UL<<sig);FreeSignal(sig);return result;
 }

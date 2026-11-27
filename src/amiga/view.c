@@ -265,6 +265,7 @@ static void wrap(ChatView *cv, struct RastPort *rp, int kind, const char *s, int
             l->hl = (UBYTE)hl;
         return;
     }
+    if(kind==VL_CODE) {VLine *l=add_line(cv,kind,s,len);if(l)l->hl=hl;return;}
     while (len > 0) {
         int n = fit(rp, s, len, maxw), cut;
         VLine *l;
@@ -350,6 +351,8 @@ static int name_colour(const char *name)
 
 const char *view_attachment_limit(const RcAttachment *file,int preview)
 {
+    /* Original file size is not the size of a separate server thumbnail. */
+    if(preview && file->image && file->preview_url && *file->preview_url && file->url && strcmp(file->preview_url,file->url)) return NULL;
     if(file->size>8LL*1024*1024) return "This file exceeds the 8 MiB download limit. Open it using the desktop client.";
     if(preview && file->size>2LL*1024*1024) return "This image exceeds the 2 MiB preview limit. Save it instead (up to 8 MiB).";
     return NULL;
@@ -467,15 +470,7 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
                 t = buf_str(&para); while (*t == ' ' || *t == '\t') t++;
                 marker = (!strncmp(t, "```", 3) || !strncmp(t, "~~~", 3)) && !strstr(t + 3, !strncmp(t,"```",3) ? "```" : "~~~");
                 if (marker && (!fenced || *t == fence)) {
-                    if (!fenced) {
-                        fence = *t; buf_clear(&text); buf_puts(&text, "Code");
-                        if (t[3]) { buf_puts(&text, ": "); utf8_to_latin1(&text, t + 3, 0); }
-                        { struct TextFont *old = rp->Font;
-                          if (cv->code_font) SetFont(rp, cv->code_font);
-                          wrap(cv, rp, VL_CODE, buf_str(&text), maxw, 0);
-                          SetFont(rp, old);
-                        }
-                    }
+                    fence=*t;
                     fenced = !fenced;
                 } else {
                     buf_clear(&text);
@@ -506,14 +501,18 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
         if (m->file_count) {
             int f;
             for (f = 0; f < m->file_count; f++) {
-                int first = cv->n, j;
+                int j, state=0; char title[256], size[48], label[320]; VLine *line;
                 buf_clear(&para);
-                buf_puts(&para, m->files[f].image ? "[Image] " : "[File] ");
-                utf8_to_latin1(&para, m->files[f].title ? m->files[f].title : "attachment", 0);
-                { char size[48]; view_file_size(size,sizeof(size),m->files[f].size); buf_printf(&para," (%s)",size); }
-                buf_puts(&para, m->files[f].image && cv->inline_images ? "  - click to expand / collapse" : "  - click to save");
-                wrap(cv, rp, VL_FILE, buf_str(&para), maxw, 0);
-                for (j = first; j < cv->n; j++) cv->v[j].file_index = f;
+                utf8_to_latin1(&para,m->files[f].title?m->files[f].title:"attachment",0);
+                view_file_size(size,sizeof(size),m->files[f].size);
+                side_label_fit(rp,buf_str(&para),(maxw<480?maxw:480)-view_text_width(rp,size,strlen(size))-view_text_width(rp,"[IMG]   ",8),1,title);
+                snprintf(label,sizeof(label),"%s %s  %s",m->files[f].image?"[IMG]":"[FILE]",title,size);
+                line=add_line(cv,VL_FILE,label,strlen(label)); if(line)line->file_index=f;
+                for(j=0;j<cv->nimages;j++) if(cv->images[j].msg_index==i && cv->images[j].file_index==f) state=cv->images[j].state;
+                if(m->files[f].image && cv->inline_images)
+                    snprintf(label,sizeof(label),"%s | Open | Save",state==1?"Loading...":state==2?"Failed: Retry":state==3?"Hide":"Preview");
+                else strcpy(label,"Open | Save");
+                line=add_line(cv,VL_FILE_ACTION,label,strlen(label)); if(line) {line->file_index=f;line->hl=!(m->files[f].image && cv->inline_images);}
                 for (j = 0; j < cv->nimages; j++) if (cv->images[j].msg_index == i && cv->images[j].file_index == f) {
                     int y;
                     for (y = 0; y < cv->images[j].height; y += lh) {
@@ -530,7 +529,7 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
         }
 
         if (m->reactions) {   /* "code count" lines -> "<3 1\n(y) 2" pills */
-            const char *r = m->reactions;
+            const char *r = m->reactions;ULONG own=0;int reaction_index=0;
             buf_clear(&para);
             while (*r) {
                 const char *e = strchr(r, '\n'), *sp;
@@ -541,6 +540,8 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
                     int e;
                     memcpy(code, r, (size_t)(sp - r));
                     code[sp - r] = 0;
+                    if(reaction_index<32 && rc_reaction_has(m,code,me))own|=1UL<<reaction_index;
+                    reaction_index++;
                     e = emoji_by_code(code, strlen(code));
                     if (para.len)
                         buf_putc(&para, '\n');
@@ -558,8 +559,7 @@ void chat_layout(ChatView *cv, struct RastPort *rp, int width, const RcMsgList *
                 if (*r == '\n')
                     r++;
             }
-            if (para.len)   /* Latin-1 with emoji markers (codes are ASCII) */
-                add_line(cv, VL_PILLS, buf_str(&para), (int)para.len);
+            if(para.len) {VLine *line=add_line(cv,VL_PILLS,buf_str(&para),(int)para.len);if(line)line->own_reactions=own;}
         }
     }
     buf_free(&text);
@@ -591,6 +591,25 @@ static void pill(struct RastPort *rp, int x, int y, int h, const char *s, int le
     SetBPen(rp, p->pill_bg);
     text_at(rp, x + 5, y + 1, s, len);
     SetBPen(rp, p->bg);
+}
+
+/* A bounded lexical colour pass; never changes whitespace or copied text. */
+static void code_text(struct RastPort *rp,const ViewPens *p,int x,int y,const char *s,int len,int width)
+{
+    int i=0,limit=fit(rp,s,len,width);
+    while(i<limit) {
+        int start=i;LONG pen=p->pill_text;unsigned char c=s[i];
+        if(c=='#' || (c=='/' && i+1<limit && s[i+1]=='/') || (c==';' && !i)) {i=limit;pen=p->dim;}
+        else if(c=='"' || c=='\'') {int quote=c;i++;while(i<limit) {if(s[i]=='\\' && i+1<limit)i+=2;else if(s[i++]==quote)break;}pen=p->presence[0];}
+        else if(c>='0' && c<='9') {do{i++;}while(i<limit && ((s[i]>='0' && s[i]<='9') || s[i]=='.' || s[i]=='x' || (s[i]>='a' && s[i]<='f')));pen=p->presence[2];}
+        else if((c>='a' && c<='z') || (c>='A' && c<='Z') || c=='_') {
+            char word[48];int n;do{i++;}while(i<limit && ((s[i]>='a' && s[i]<='z') || (s[i]>='A' && s[i]<='Z') || (s[i]>='0' && s[i]<='9') || s[i]=='_'));
+            n=i-start;if(n<(int)sizeof(word)-2) {char key[52];memcpy(word,s+start,n);word[n]=0;snprintf(key,sizeof(key),"|%s|",word);
+              if(strstr("|echo|printf|if|else|then|fi|for|while|do|done|return|int|char|void|const|struct|def|class|import|from|true|false|null|function|var|let|local|set|",key))pen=p->avatar[0];}
+        } else i++;
+        if(pen==p->pill_bg)pen=p->pill_text;
+        SetAPen(rp,pen);Move(rp,x,y);Text(rp,(CONST_STRPTR)(s+start),i-start);x+=TextLength(rp,(CONST_STRPTR)(s+start),i-start);
+    }
 }
 
 void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const ViewPens *p)
@@ -667,6 +686,7 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
         }
         case VL_IMAGE: {
             int j;
+            SetAPen(rp,p->pill_bg);RectFill(rp,x-3,y,x+(avail<480?avail:480),y+lh-1);
             for (j = 0; j < cv->nimages; j++) {
                 const ChatImage *image = &cv->images[j];
                 if (image->msg_index == l->msg_index && image->file_index == l->file_index) {
@@ -680,11 +700,14 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             break;
         }
         case VL_FILE:
-            SetAPen(rp, p->text);
-            bold(rp, 0);
-            SetSoftStyle(rp, FSF_UNDERLINED, AskSoftStyle(rp));
-            text_at(rp, left + indent, y, s, l->len);
-            SetSoftStyle(rp, 0, AskSoftStyle(rp));
+        case VL_FILE_ACTION:
+            SetAPen(rp,p->pill_bg);
+            RectFill(rp,x-3,y,x+(avail<480?avail:480),y+lh-1);
+            SetBPen(rp,p->pill_bg);SetAPen(rp,p->pill_text);
+            bold(rp,0);
+            if(l->kind==VL_FILE_ACTION)SetSoftStyle(rp,FSF_UNDERLINED,AskSoftStyle(rp));
+            text_at(rp,x,y,s,fit(rp,s,l->len,avail));
+            SetSoftStyle(rp,0,AskSoftStyle(rp));SetBPen(rp,p->bg);
             break;
         case VL_CODE: {
             struct TextFont *old = rp->Font;
@@ -693,7 +716,7 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             SetBPen(rp, p->pill_bg); SetAPen(rp, p->pill_text);
             if (cv->code_font) SetFont(rp, cv->code_font);
             Move(rp, x, y + (lh - rp->TxHeight) / 2 + rp->TxBaseline);
-            Text(rp, (CONST_STRPTR)s, l->len);
+            code_text(rp,p,x,y+(lh-rp->TxHeight)/2+rp->TxBaseline,s,l->len,avail);
             SetFont(rp, old); SetBPen(rp, p->bg);
             break;
         }
@@ -709,14 +732,16 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
             break;
         case VL_PILLS: {
             const char *q = s, *end = s + l->len;
-            int px = x;
+            int px = x,index=0;
             while (q < end) {
                 const char *e = (const char *)memchr(q, '\n', (size_t)(end - q));
                 int len = (int)((e ? e : end) - q);
                 int w = view_text_width(rp, q, len) + 10;
                 if (px + w > right - PAD)
                     break;
-                pill(rp, px, y, lh, q, len, p);
+                if(index<32 && (l->own_reactions&(1UL<<index))) {ViewPens selected=*p;selected.pill_bg=p->accent;selected.pill_text=p->accent_text;pill(rp,px,y,lh,q,len,&selected);}
+                else pill(rp, px, y, lh, q, len, p);
+                index++;
                 px += w + 6;
                 q = e ? e + 1 : end;
             }
@@ -738,6 +763,39 @@ void chat_draw(ChatView *cv, struct RastPort *rp, const struct IBox *box, const 
         SetSoftStyle(rp, 0, AskSoftStyle(rp));
       }
     }
+}
+
+/* Attachment actions use the same text metrics and indent as drawing. */
+int chat_reaction_hit(const ChatView *cv,struct RastPort *rp,int x,int y)
+{
+    int row,index=0,px,right;const VLine *line;const char *q,*end;
+    if(y<0 || cv->line_h<=0 || y>=cv->visible*cv->line_h)return -1;
+    row=cv->top+y/cv->line_h;if(row<0 || row>=cv->n || cv->v[row].kind!=VL_PILLS)return -1;
+    line=&cv->v[row];q=cv->pool.data+line->off;end=q+line->len;
+    px=cv->no_avatars?PAD+8:text_indent(cv->line_h);right=cv->width-1-PAD;
+    while(q<end) {const char *next=memchr(q,'\n',end-q);int len=(next?next:end)-q,w=view_text_width(rp,q,len)+10;
+        if(px+w>right)break;
+        if(x>=px && x<px+w)return index;
+        px+=w+6;index++;q=next?next+1:end;}
+    return -1;
+}
+
+int chat_file_action(const ChatView *cv,struct RastPort *rp,int x,int y)
+{
+    int row,offset,action=0,start=0,i;const VLine *line;const char *s;
+    if(y<0 || cv->line_h<=0)return -1;
+    row=cv->top+y/cv->line_h;if(row<0 || row>=cv->n)return -1;
+    line=&cv->v[row];if(line->kind!=VL_FILE_ACTION)return -1;
+    action=line->hl?1:0;
+    offset=cv->no_avatars?PAD+8:text_indent(cv->line_h);
+    if(x<offset)return -1;
+    s=cv->pool.data+line->off;
+    for(i=0;i<=line->len;i++)if(i==line->len || s[i]=='|') {
+        int end=offset+view_text_width(rp,s,i);
+        if(x<end)return action;
+        start=i+1;action++;
+    }
+    (void)start;return -1;
 }
 
 const char *chat_link_hit(const ChatView *cv, int x, int y)

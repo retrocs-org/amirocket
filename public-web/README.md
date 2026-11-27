@@ -4,6 +4,10 @@ A responsive PHP website. No Composer packages, external fonts or tracking.
 PHP 8.1+ is required to host it; preparation also needs Python 3.9+.
 The chat and Preferences images are real native emulator screenshots with sample conversations. See SCREENSHOTS.md for provenance and reproduction steps.
 
+Website changes are recorded separately in [changelog.md](changelog.md).
+The application changelog remains in the repository root; preparation copies it
+to `dist/docs/changelog.md` and the website changelog to `dist/changelog.md`.
+
 ## Prepare and preview
 
 ```sh

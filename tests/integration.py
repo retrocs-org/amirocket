@@ -5,6 +5,7 @@ mock Rocket.Chat server in several configurations.
 
   python3 tests/integration.py build/host/rcli
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -225,6 +226,23 @@ def test_ambiguous_send():
         m.stop()
 
 
+def test_delivery_id_recovery():
+    m = Mock("--lose-send-reply")
+    try:
+        rc, out, err = rcli(*login_args(m), "send-id", "general", "AR-test-once", "restart-safe send")
+        check(rc != 0 and "Delivery unconfirmed" in err, "keyed send reports lost acknowledgment", err)
+        rc, out, err = rcli(*login_args(m), "confirm-id", "general", "AR-test-once", "restart-safe send")
+        check(rc == 0 and "restart-safe send" in out, "new client process confirms original delivery", out + err)
+        rc, out, err = rcli(*login_args(m), "confirm-id", "general", "AR-test-once", "changed draft")
+        check(rc != 0, "confirmation refuses a changed draft", out + err)
+        rc, out, err = rcli(*login_args(m), "send-id", "general", "AR-test-once", "restart-safe send")
+        check(rc != 0, "same ID cannot create a second message", out + err)
+        rc, out, err = rcli(*login_args(m), "history", "general", "50")
+        check(rc == 0 and out.count("restart-safe send") == 1, "lost reply and explicit retry retain exactly one message", out + err)
+    finally:
+        m.stop()
+
+
 def test_prefix_and_errors():
     m = Mock("--prefix", "/chat")
     try:
@@ -299,6 +317,65 @@ def test_multiple_servers():
         second.stop()
 
 
+def test_search_and_upload():
+    m = Mock()
+    try:
+        for i in range(31):
+            m.post("/mock/inject", {"rid": "GENERAL", "msg": "needle %02d" % i, "user": "alice"})
+        rc, out, err = rcli(*login_args(m), "search", "general", "needle", "25")
+        check(rc == 0 and "total=31" in out and len(entries(out)) == 6, "search second page", out + err)
+        with tempfile.TemporaryDirectory() as temp:
+            payload = bytes(range(256)) * 1024
+            path = os.path.join(temp, "binary.bin")
+            with open(path, "wb") as target:
+                target.write(payload)
+            rc, out, err = rcli(*login_args(m), "upload", "general", path)
+            stats = m.get("/mock/stats")
+            check(rc == 0 and "Attachment sent" in out, "streamed multipart upload and confirmation", out + err)
+            check(stats.get("upload_sha256") == hashlib.sha256(payload).hexdigest(), "upload preserves all binary bytes")
+            check(stats.get("upload_count") == 1 and stats.get("confirm_count") == 1, "upload and confirmation each sent once")
+    finally:
+        m.stop()
+
+
+def test_message_actions():
+    m = Mock()
+    try:
+        args = login_args(m)
+        rc, out, err = rcli(*args, "send", "general", "action parent")
+        rc, out, err = rcli(*args, "search", "general", "action parent")
+        data = m.get("/mock/stats")
+        mid = data.get("last_message_id")
+        check(rc == 0 and bool(mid), "message action parent created", out + err)
+        if not mid:
+            return
+        rc, out, err = rcli(*args, "threadsend", "general", mid, "reply one\nreply two")
+        check(rc == 0, "thread reply sent", out + err)
+        rc, out, err = rcli(*args, "thread", "general", mid)
+        check(rc == 0 and "total=1" in out and "reply one" in out, "thread replies loaded", out + err)
+        for i in range(26):
+            m.post("/mock/inject", {"rid": "GENERAL", "msg": "paged thread reply %d" % i, "tmid": mid, "user": "alice"})
+        rc, out, err = rcli(*args, "thread", "general", mid, "25")
+        check(rc == 0 and "total=27" in out and len(entries(out)) == 2, "thread second page", out + err)
+        other = m.post("/mock/inject", {"rid": "GENERAL", "msg": "another author", "user": "alice"})["message"]["_id"]
+        rc, out, err = rcli(*args, "edit", "general", other, "forbidden")
+        check(rc != 0, "cannot edit another user's message", out + err)
+        rc, out, err = rcli(*args, "delete", "general", other)
+        check(rc != 0, "cannot delete another user's message", out + err)
+        rc, out, err = rcli(*args, "edit", "general", mid, 'changed "quoted" \nsecond line')
+        check(rc == 0 and "changed" in out, "edit own message", out + err)
+        for add in ("1", "0"):
+            rc, out, err = rcli(*args, "react", "general", mid, "smile", add)
+            last = m.get("/mock/stats").get("last_reaction", {})
+            check(rc == 0 and last.get("shouldReact") is (add == "1") and last.get("emoji") == "smile", "reaction setter " + add, out + err)
+        rc, out, err = rcli(*args, "delete", "general", mid)
+        check(rc == 0, "delete own message", out + err)
+        rc, out, err = rcli(*args, "edit", "general", mid, "missing")
+        check(rc != 0, "missing/deleted message failure surfaced", out + err)
+    finally:
+        m.stop()
+
+
 def main():
     if not os.path.exists(RCLI):
         print("rcli not found:", RCLI)
@@ -307,10 +384,13 @@ def main():
     test_totp()
     test_flaky_and_chunked()
     test_ambiguous_send()
+    test_delivery_id_recovery()
     test_prefix_and_errors()
     test_tls()
     test_download_and_paging()
     test_multiple_servers()
+    test_search_and_upload()
+    test_message_actions()
     print("integration tests: %d passed, %d failed" % (PASSES, len(FAILS)))
     return 1 if FAILS else 0
 

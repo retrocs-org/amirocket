@@ -543,8 +543,10 @@ class GitLab:
         final = self.release()
         self.verify(final)
         need(not final.get('upcoming_release', False), 'GitLab release is still upcoming')
-        latest = self.api.json(self.base + '/releases/permalink/latest')
-        need(latest and latest.get('tag_name') == self.m['tag'], 'GitLab release is not latest')
+        # GitLab's permalink endpoint redirects to a numeric project URL.
+        # Query the ordered release list so no authenticated redirect is needed.
+        latest = self.api.json(self.base + '/releases?order_by=released_at&sort=desc&per_page=1')
+        need(isinstance(latest, list) and latest and latest[0].get('tag_name') == self.m['tag'], 'GitLab release is not latest')
 
 class HashingReader:
     def __init__(self, stream):
@@ -725,14 +727,16 @@ class Release:
                              'compiler': native['compiler'], 'compiler_version': native['compiler_version'],
                              'runtime_validation': 'Manual hardware testing remains separate from build success'},
                   'configuration_sha256': hashlib.sha256(canonical(self.binding())).hexdigest()}
+        archive_timestamp = int(time.time())
+        record['packaged_at'] = datetime.fromtimestamp(archive_timestamp, timezone.utc).isoformat(timespec='seconds')
         print('[6/7] Packaging Amiga LHA, plugin SDK and checksums...',flush=True)
         step_started=time.monotonic()
         # Preserve an older build record if preparation fails; check() will reject it.
         with tempfile.TemporaryDirectory(dir=self.out, prefix='.prepare-') as stage_name:
             stage = Path(stage_name)
-            lha_write(stage / ('AmiRocket-' + self.version + '.lha'), self.runtime_entries(), self.config['env'].get('LHA'))
-            zip_write(stage/self.sdk_name,sdk_entries(self.root))
-            zip_write(stage/self.source_name,source_entries(self.root))
+            lha_write(stage / ('AmiRocket-' + self.version + '.lha'), self.runtime_entries(), self.config['env'].get('LHA'), timestamp=archive_timestamp)
+            zip_write(stage/self.sdk_name,sdk_entries(self.root),timestamp=archive_timestamp)
+            zip_write(stage/self.source_name,source_entries(self.root),timestamp=archive_timestamp)
             for name in self.payload_names:
                 (stage/(name+'.sha256')).write_text(sha(stage/name)+'  '+name+'\n')
             need(self.inputs() == before, 'Release inputs changed during packaging')

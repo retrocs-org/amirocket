@@ -10,6 +10,9 @@ inject messages from other users and to inspect connection statistics.
 
 Prints "PORT <n>" on stdout once listening.
 """
+import hashlib
+from email.parser import BytesParser
+from email.policy import default as mime_policy
 import argparse
 import datetime as dt
 import json
@@ -187,6 +190,21 @@ class Handler(BaseHTTPRequestHandler):
         user = self.auth_user()
         if not user:
             return
+        if p == "/api/v1/chat.getMessage":
+            found = next((m for messages in MESSAGES.values() for m in messages if m["_id"] == q.get("msgId")), None)
+            if found is None:
+                return self.fail(404, "error-invalid-message")
+            return self.send_json(200, {"message": found, "success": True})
+        if p == "/api/v1/chat.getThreadMessages":
+            found = [m for messages in MESSAGES.values() for m in messages if m.get("tmid") == q.get("tmid")]
+            count, offset = int(q.get("count", "25")), int(q.get("offset", "0"))
+            return self.send_json(200, {"messages": found[offset:offset+count], "total": len(found), "success": True})
+        if p == "/api/v1/chat.search":
+            rid = q.get("roomId", "")
+            query = q.get("searchText", "")
+            count, offset = int(q.get("count", "25")), int(q.get("offset", "0"))
+            found = [m for m in MESSAGES.get(rid, []) if query.lower() in m.get("msg", "").lower()]
+            return self.send_json(200, {"messages": found[offset:offset+count], "total": len(found), "success": True})
         if p == "/file-upload/x/redirect.png":
             self.send_response(302)
             self.send_header("Location", self.server.prefix + "/file-upload/x/screenshot.png")
@@ -278,6 +296,18 @@ class Handler(BaseHTTPRequestHandler):
         if p is None:
             self.body_json()
             return self.send_html(404)
+        if p.startswith("/api/v1/rooms.media/"):
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if not self.auth_user():
+                return
+            mime = BytesParser(policy=mime_policy).parsebytes(("Content-Type: " + self.headers.get("Content-Type", "") + "\r\nMIME-Version: 1.0\r\n\r\n").encode() + raw)
+            parts = [part for part in mime.iter_parts() if part.get_param("name", header="content-disposition") == "file"] if mime.is_multipart() else []
+            if len(parts) != 1:
+                return self.fail(400, "bad-multipart")
+            data = parts[0].get_payload(decode=True)
+            STATS["upload_sha256"] = hashlib.sha256(data).hexdigest()
+            STATS["upload_count"] = STATS.get("upload_count", 0) + 1
+            return self.send_json(200, {"file": {"_id": "uploaded1"}, "success": True})
         body = self.body_json()
         if body is None:
             return self.fail(400, "invalid-json", "Invalid JSON body")
@@ -288,17 +318,44 @@ class Handler(BaseHTTPRequestHandler):
         user = self.auth_user()
         if not user:
             return
+        if p.startswith("/api/v1/rooms.mediaConfirm/"):
+            STATS["confirm_count"] = STATS.get("confirm_count", 0) + 1
+            return self.send_json(200, {"success": True})
         if p == "/api/v1/logout":
             for t, u in list(TOKENS.items()):
                 if u == user and t == self.headers.get("X-Auth-Token"):
                     del TOKENS[t]
             return self.send_json(200, {"status": "success", "data": {"message": "You've been logged out!"}})
+        if p in ("/api/v1/chat.update", "/api/v1/chat.delete", "/api/v1/chat.react"):
+            mid = body.get("msgId") or body.get("messageId")
+            found = next((m for messages in MESSAGES.values() for m in messages if m["_id"] == mid), None)
+            if not found:
+                return self.fail(400, "error-message-not-found")
+            if p != "/api/v1/chat.react" and (found["rid"] != body.get("roomId") or found["u"]["username"] != user):
+                return self.fail(403, "error-not-authorized")
+            if p == "/api/v1/chat.update":
+                found["msg"] = body["text"]
+                found["editedAt"] = found["_updatedAt"] = iso(now_ms())
+                return self.send_json(200, {"message": found, "success": True})
+            if p == "/api/v1/chat.delete":
+                MESSAGES[found["rid"]].remove(found)
+            else:
+                STATS["last_reaction"] = body
+            return self.send_json(200, {"success": True})
         if p == "/api/v1/chat.sendMessage":
             m = body.get("message") or {}
             rid, text = m.get("rid"), m.get("msg")
             if rid not in ROOMS or not isinstance(text, str):
                 return self.fail(400, "error-invalid-params", "Invalid message")
+            message_id = m.get("_id")
+            if message_id and any(message_id == prior["_id"] for messages in MESSAGES.values() for prior in messages):
+                return self.fail(400, "error-duplicate-message")
             msg = make_msg(rid, user, text)
+            if message_id:
+                msg["_id"] = message_id
+            STATS["last_message_id"] = msg["_id"]
+            if m.get("tmid"):
+                msg["tmid"] = m["tmid"]
             with LOCK:
                 MESSAGES[rid].append(msg)
             if self.server.lose_send_reply:
@@ -348,6 +405,8 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             if p == "/mock/inject":
                 msg = make_msg(rid, body.get("user", "alice"), body["msg"])
+                if body.get("tmid"):
+                    msg["tmid"] = body["tmid"]
                 MESSAGES[rid].append(msg)
                 s = SUBS[rid]
                 s.update(unread=s["unread"] + 1, alert=True, _updatedAt=iso(now_ms()))

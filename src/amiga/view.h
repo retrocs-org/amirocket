@@ -33,9 +33,9 @@ void view_emoji(struct RastPort *rp, const ViewPens *p, int x, int y, int idx);
 int  view_emoji_size(struct RastPort *rp);
 
 /* ---- message view ---- */
-enum { VL_GAP, VL_DAY, VL_HEADER, VL_TEXT, VL_SYS, VL_PILLS, VL_FILE, VL_CODE, VL_IMAGE, VL_UNREAD };
+enum { VL_GAP, VL_DAY, VL_HEADER, VL_TEXT, VL_SYS, VL_PILLS, VL_FILE, VL_CODE, VL_IMAGE, VL_UNREAD, VL_FILE_ACTION };
 typedef struct { int row, start, len, x, width; LONG url; } VLink;
-typedef struct { int msg_index, file_index, width, height; struct BitMap *bitmap; } ChatImage;
+typedef struct { int msg_index, file_index, width, height, state; struct BitMap *bitmap; } ChatImage;
 
 typedef struct {
     int msg_index;
@@ -44,6 +44,7 @@ typedef struct {
     UBYTE hl;          /* text in the highlight pen (mentions you) */
     UBYTE avatar;      /* header: avatar colour index */
     char  initial;     /* header: avatar letter */
+    ULONG own_reactions;
     WORD image_y;
     WORD  name_len;    /* header: bytes of the (bold) name; the time follows */
     LONG  off;         /* text offset in the pool */
@@ -78,6 +79,8 @@ void chat_scroll_to(ChatView *cv, int top);    /* clamps; clears follow unless a
 
 /* Visible row -> message and attachment; returns 1 for a downloadable file. */
 const char *chat_link_hit(const ChatView *cv, int x, int y);
+int chat_reaction_hit(const ChatView *cv,struct RastPort *rp,int x,int y);
+int chat_file_action(const ChatView *cv, struct RastPort *rp, int x, int y);
 int chat_file_hit(const ChatView *cv, int y, int *message, int *file);
 
 /* ---- sidebar ---- */

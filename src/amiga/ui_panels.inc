@@ -1,5 +1,13 @@
 #include <images/bevel.h>
 /* Sectioned native dialogs. Included by gui.c to share its screen and worker event pump. */
+static void window_cleanup_trace(const char *s)
+{
+#ifdef AR_GUI_QA
+    Write(Output(),(APTR)s,strlen(s));
+#else
+    (void)s;
+#endif
+}
 static Object *panel_button(int id, const char *text)
 {
     return ButtonObject, GA_ID, id, GA_RelVerify, TRUE, GA_Text, (ULONG)text, End;
@@ -31,9 +39,10 @@ static void panel_wait(Object *obj)
     ULONG mask = 0, sig;
     sync_conversation_focus();
     GetAttr(WINDOW_SigMask, obj, &mask);
-    sig = Wait(mask | arexx_signal() | prefs_service_signal(G.prefs_service) | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C);
-    if (!G.transfer_dialog && (sig & arexx_signal())) arexx_handle();
+    sig = Wait(mask | client_tick_signal() | arexx_signal() | prefs_service_signal(G.prefs_service) | (1UL << G.port->mp_SigBit) | SIGBREAKF_CTRL_C);
+    if (sig & arexx_signal()) arexx_handle();
     if (!G.transfer_dialog && (sig & prefs_service_signal(G.prefs_service))) handle_preferences();
+    if(sig & client_tick_signal()) client_tick_handle();
     if (sig & SIGBREAKF_CTRL_C) G.quit = 1;
     if (sig & (1UL << G.port->mp_SigBit)) handle_port();
     if (G.dirty) redraw_dirty();
@@ -42,7 +51,7 @@ static void panel_wait(Object *obj)
 
 #include "plugin_catalog.inc"
 static struct ColumnInfo plugin_columns[]={{48,"Plugin",CIF_WEIGHTED},{16,"Version",CIF_WEIGHTED},{36,"State",CIF_WEIGHTED},{-1,NULL,0}};
-enum { P_EMOJI, P_AVATARS, P_IMAGES, P_INTERVAL, P_FONT, P_SIZE, P_SCREEN, P_LINKS, P_BROWSER, P_VIEWER, P_PREVIEW, P_FIELDS };
+enum { P_EMOJI, P_AVATARS, P_IMAGES, P_INTERVAL, P_FONT, P_SIZE, P_SCREEN, P_LINKS, P_BROWSER, P_VIEWER, P_PREVIEW, P_SPACING, P_BACKGROUND, P_CACHE, P_MEMLOW, P_MEMCOUNT, P_MEMIMAGE, P_REALTIME, P_PREVIEWSIZE, P_EXTERNAL, P_AUTOIMAGES, P_CACHEDIR, P_DOWNLOADDIR, P_SOUND, P_FIELDS };
 typedef struct {
     Object *obj, *root, *page, *field[P_FIELDS], *theme_button, *plugin_list, *plugin_details[3], *plugin_toggle;
     Object *server_list; struct List server_nodes;
@@ -52,7 +61,8 @@ typedef struct {
     struct Window *win;
     Prefs *plugin_draft;
     int theme,direct_edit;
-    char interval[16], size[16], diagnostics[256];
+    char preview_size[16], interval[16], size[16], spacing[16], background[16], memcount[16], memimage[16], diagnostics[2304];
+    Object *network_diagnostics, *network_label,*diagnostic_copy;
 } PrefsPanel;
 #include "server_prefs.inc"
 static void prefs_plugin_select(PrefsPanel *p,int index)
@@ -125,9 +135,15 @@ static int prefs_panel_build(PrefsPanel *p)
     strcpy(p->details[0],"Select a plugin to view its details.");
     strcpy(p->details[1]," "); strcpy(p->details[2]," ");
     p->theme = theme_find(G.prefs.theme);
+    snprintf(p->preview_size,sizeof(p->preview_size),"%d",G.prefs.preview_width);
     snprintf(p->interval, sizeof(p->interval), "%d", G.prefs.interval);
+    snprintf(p->memcount,sizeof(p->memcount),"%d",G.prefs.message_limit);
+    snprintf(p->memimage,sizeof(p->memimage),"%d",G.prefs.image_cache_kib);
+    snprintf(p->spacing,sizeof(p->spacing),"%d",G.prefs.request_spacing_ms);
+    snprintf(p->background,sizeof(p->background),"%d",G.prefs.background_interval);
     snprintf(p->size, sizeof(p->size), "%d", G.prefs.chat_font_size);
-    snprintf(p->diagnostics, sizeof(p->diagnostics), "Network requests pending: %d\nAvatar cache: %d / 64 entries\nTransport: REST polling + AmiSSL\nImage previews: downloaded only on click", G.pending, G.avatar_count);
+    if(!prefs_runtime_network(p->diagnostics,sizeof(p->diagnostics)) || !p->diagnostics[0])
+        ar_strlcpy(p->diagnostics,"No running client traffic yet.",sizeof(p->diagnostics));
     root = p->root = VLayoutObject, LAYOUT_SpaceOuter, TRUE, LAYOUT_VertSpacing, 6,
         LAYOUT_AddChild, HLayoutObject,
             LAYOUT_AddChild, VLayoutObject,
@@ -136,6 +152,9 @@ static int prefs_panel_build(PrefsPanel *p)
                 LAYOUT_AddChild, panel_button(101, "Appearance"), CHILD_WeightedHeight, 0,
                 LAYOUT_AddChild, panel_button(102, "Plugins"), CHILD_WeightedHeight, 0,
                 LAYOUT_AddChild, panel_button(103, "Helpers"), CHILD_WeightedHeight, 0,
+                LAYOUT_AddChild, panel_button(107, "Network"), CHILD_WeightedHeight,0,
+                LAYOUT_AddChild,panel_button(108,"Memory"), CHILD_WeightedHeight,0,
+                LAYOUT_AddChild,panel_button(109,"Notifications"),CHILD_WeightedHeight,0,
                 LAYOUT_AddChild, panel_button(104, "Diagnostics"), CHILD_WeightedHeight, 0,
                 LAYOUT_AddChild, panel_button(105, "About"), CHILD_WeightedHeight, 0,
                 LAYOUT_AddChild, SpaceObject, End,
@@ -147,8 +166,10 @@ static int prefs_panel_build(PrefsPanel *p)
                     CHILD_Label, panel_label("Poll interval (2-600 seconds)"), CHILD_WeightedHeight, 0,
                     LAYOUT_AddChild, p->field[P_EMOJI] = panel_check(211, "Draw emoji images", G.prefs.show_emoji), CHILD_WeightedHeight, 0,
                     LAYOUT_AddChild, p->field[P_AVATARS] = panel_check(212, "Show / download user avatars", G.prefs.show_avatars), CHILD_WeightedHeight, 0,
-                    LAYOUT_AddChild, p->field[P_IMAGES] = panel_check(213, "Allow click-to-expand images", G.prefs.inline_images), CHILD_WeightedHeight, 0,
-                    LAYOUT_AddChild, panel_text("Disable graphics or increase the interval\nto reduce memory and network use.\nImages stay collapsed until clicked."), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild, p->field[P_IMAGES] = panel_check(213, "Enable thumbnail previews (off: text only)", G.prefs.inline_images), CHILD_WeightedHeight, 0,
+                    LAYOUT_AddChild,p->field[P_AUTOIMAGES]=panel_check(215,"Load visible thumbnails automatically",G.prefs.auto_thumbnails),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_PREVIEWSIZE]=mk_string(214,p->preview_size,4,0),CHILD_Label,panel_label("Preview width (160 / 320 / 640)"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild, panel_text("Disable graphics or increase the interval\nto reduce memory and network use.\nAutomatic previews are off by default."), CHILD_WeightedHeight,0,
                     LAYOUT_AddChild, SpaceObject, End,
                 End,
                 PAGE_Add, VLayoutObject, LAYOUT_SpaceOuter, TRUE, LAYOUT_VertSpacing, 6,
@@ -185,14 +206,21 @@ static int prefs_panel_build(PrefsPanel *p)
                     LAYOUT_AddChild, p->field[P_BROWSER] = mk_string(231, G.prefs.browser, 127, 0),
                     CHILD_Label, panel_label("Browser helper executable"), CHILD_WeightedHeight, 0,
                     LAYOUT_AddChild, p->field[P_VIEWER] = mk_string(232, G.prefs.image_viewer, 127, 0),
-                    CHILD_Label, panel_label("Downloaded image viewer"), CHILD_WeightedHeight, 0,
+                    CHILD_Label, panel_label("Image viewer executable"), CHILD_WeightedHeight, 0,
+                    LAYOUT_AddChild,p->field[P_CACHEDIR]=mk_string(235,G.prefs.cache_dir,255,0),CHILD_Label,panel_label("Media cache drawer"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_DOWNLOADDIR]=mk_string(236,G.prefs.download_dir,255,0),CHILD_Label,panel_label("Default download drawer"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_EXTERNAL]=panel_check(234,"Open full-size images in external viewer",G.prefs.external_images),CHILD_WeightedHeight,0,
                     LAYOUT_AddChild, p->field[P_PREVIEW] = panel_check(233, "Open saved images in viewer", G.prefs.preview_images), CHILD_WeightedHeight, 0,
                     LAYOUT_AddChild, panel_text("Configure OpenURL's browser separately.\nNative plugin modules are configured\nin the Plugins section."), CHILD_WeightedHeight,0,
                     LAYOUT_AddChild, SpaceObject, End,
                 End,
                 PAGE_Add, VLayoutObject, LAYOUT_SpaceOuter, TRUE, LAYOUT_VertSpacing, 6,
                     LAYOUT_AddChild, panel_text("Diagnostics"), CHILD_WeightedHeight, 0,
-                    LAYOUT_AddChild, panel_text(p->diagnostics), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild, p->network_diagnostics=ButtonObject, GA_ReadOnly,TRUE, BUTTON_BevelStyle,BVS_NONE, BUTTON_Justification,BCJ_LEFT,
+                        BUTTON_RenderImage,(ULONG)(p->network_label=LabelObject,LABEL_Text,(ULONG)p->diagnostics,LABEL_Justification,LJ_LEFT,End),End, CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,panel_button(292,"Refresh network statistics"), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->diagnostic_copy=panel_button(293,"Copy diagnostic report"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,panel_text("Statistics are sampled every 5 seconds.\nRequests/min is a sliding estimate; HTTP 0\nmeans a transport failure. Queues never\nautomatically replay failed message sends."), CHILD_WeightedHeight,0,
                     LAYOUT_AddChild, SpaceObject, End,
                 End,
                 PAGE_Add, VLayoutObject, LAYOUT_SpaceOuter, TRUE, LAYOUT_VertSpacing, 6,
@@ -214,7 +242,33 @@ static int prefs_panel_build(PrefsPanel *p)
                     LAYOUT_AddChild,panel_button(284,"Toggle auto-connect"), CHILD_WeightedHeight,0,
                     LAYOUT_AddChild,panel_text("Each server keeps its own account and rooms.\nUse applies this list now; Save also keeps it.\nAuto-connect uses a remembered login on startup."), CHILD_WeightedHeight,0,
                 End,
-
+                PAGE_Add, VLayoutObject, LAYOUT_SpaceOuter,TRUE, LAYOUT_VertSpacing,8,
+                    LAYOUT_AddChild,panel_text("Network / proxy protection"), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_REALTIME]=panel_check(299,"Realtime WebSocket updates",G.prefs.realtime), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_SPACING]=mk_string(293,p->spacing,5,0),
+                        CHILD_Label,panel_label("Request gap (100-5000 ms)"), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_BACKGROUND]=mk_string(294,p->background,4,0),
+                        CHILD_Label,panel_label("Idle polling (15-600 seconds)"), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_CACHE]=panel_check(295,"Cache avatars on disk (24 hours)",G.prefs.avatar_disk_cache), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,panel_text("Limits apply separately to each server.\n429/503 Retry-After pauses all requests.\nRealtime coalesces events; REST catches up.\nAvatar cache: 64 slots, up to 8 MiB.\nClear the selected cache to remove avatars."), CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,SpaceObject,End,
+                End,
+                PAGE_Add,VLayoutObject,LAYOUT_SpaceOuter,TRUE,LAYOUT_VertSpacing,6,
+                    LAYOUT_AddChild,panel_text("Memory / cache limits"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,panel_button(309,"Use low-resource preset"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_MEMLOW]=panel_check(296,"Low-memory mode",G.prefs.low_memory),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_MEMCOUNT]=mk_string(297,p->memcount,5,0),CHILD_Label,panel_label("Messages per server (50-1000)"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_MEMIMAGE]=mk_string(298,p->memimage,5,0),CHILD_Label,panel_label("Image cache (256-8192 KiB)"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,panel_text("Low memory: at most 200 messages,\navatar/emoji drawing off, two image previews\nand 512 KiB of encoded image cache.\nDownloads are limited to 2 MiB.\nUse Room / Clear media caches in the client."),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,SpaceObject,End,
+                End,
+                PAGE_Add,VLayoutObject,LAYOUT_SpaceOuter,TRUE,LAYOUT_VertSpacing,8,
+                    LAYOUT_AddChild,panel_text("Notification sounds"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,p->field[P_SOUND]=mk_string(237,G.prefs.notification_sound,255,0),CHILD_Label,panel_label("Sound file (blank: system beep)"),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,HLayoutObject,LAYOUT_AddChild,panel_button(238,"Test sound"),LAYOUT_AddChild,panel_button(239,"Use bundled sound"),End,CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,panel_text("Uses installed sound datatypes, for example 8SVX.\nShort files up to 256 KiB; played once.\nEnable sounds per server under Servers / Edit.\nQuiet mode and mention-only rules still apply.\nAlerts are limited to one sound every 2 seconds."),CHILD_WeightedHeight,0,
+                    LAYOUT_AddChild,SpaceObject,End,
+                End,
             End,
         End,
         LAYOUT_AddChild, HLayoutObject, LAYOUT_EvenSize, TRUE,
@@ -244,9 +298,21 @@ static int prefs_panel_read(PrefsPanel *p, Prefs *out)
 {
     int interval = atoi(str_of(p->field[P_INTERVAL])), size = atoi(str_of(p->field[P_SIZE]));
     if (interval < 2 || interval > 600 || size < 8 || size > 48) return 0;
-    *out = *p->plugin_draft; out->interval = interval; out->chat_font_size = size;
+    if(atoi(str_of(p->field[P_SPACING]))<100 || atoi(str_of(p->field[P_SPACING]))>5000 ||
+       atoi(str_of(p->field[P_BACKGROUND]))<15 || atoi(str_of(p->field[P_BACKGROUND]))>600) return 0;
+    *out = *p->plugin_draft;
+    if(prefs_set(out,"message_limit",str_of(p->field[P_MEMCOUNT])) || prefs_set(out,"image_cache_kib",str_of(p->field[P_MEMIMAGE]))) return 0;
+    if(prefs_set(out,"preview_width",str_of(p->field[P_PREVIEWSIZE]))) return 0;
+    out->low_memory=checked(p->field[P_MEMLOW]);
+    out->realtime=checked(p->field[P_REALTIME]);
+    out->request_spacing_ms=atoi(str_of(p->field[P_SPACING])); out->background_interval=atoi(str_of(p->field[P_BACKGROUND]));
+    out->avatar_disk_cache=checked(p->field[P_CACHE]); out->interval = interval; out->chat_font_size = size;
     out->show_emoji = checked(p->field[P_EMOJI]); out->show_avatars = checked(p->field[P_AVATARS]);
     out->inline_images = checked(p->field[P_IMAGES]); out->open_links = checked(p->field[P_LINKS]);
+    if(prefs_set(out,"notification_sound",str_of(p->field[P_SOUND])))return 0;
+    if(prefs_set(out,"cache_dir",str_of(p->field[P_CACHEDIR])) || prefs_set(out,"download_dir",str_of(p->field[P_DOWNLOADDIR])))return 0;
+    out->auto_thumbnails=checked(p->field[P_AUTOIMAGES]);
+    out->external_images=checked(p->field[P_EXTERNAL]);
     out->ownscreen = checked(p->field[P_SCREEN]); out->preview_images = checked(p->field[P_PREVIEW]);
     ar_strlcpy(out->theme, theme_get(p->theme)->id, sizeof(out->theme));
     ar_strlcpy(out->chat_font, str_of(p->field[P_FONT]), sizeof(out->chat_font));
@@ -264,7 +330,7 @@ static void prefs_panel_dispose(PrefsPanel *p)
 }
 static int prefs_ui_equal(const Prefs *a,const Prefs *b)
 {
-    static const char *keys[]={"interval","theme","ownscreen","chat_font","chat_font_size","preview_images","show_emoji","show_avatars","inline_images","open_links","browser","image_viewer",NULL};
+    static const char *keys[]={"notification_sound","cache_dir","download_dir","auto_thumbnails","external_images","preview_width","realtime","low_memory","message_limit","image_cache_kib","request_spacing_ms","background_interval","avatar_disk_cache","interval","theme","ownscreen","chat_font","chat_font_size","preview_images","show_emoji","show_avatars","inline_images","open_links","browser","image_viewer",NULL};
     char av[256],bv[256]; int i;
     for(i=0;keys[i];i++) if(prefs_get(a,keys[i],av,sizeof(av)) || prefs_get(b,keys[i],bv,sizeof(bv)) || strcmp(av,bv)) return 0;
     for(i=0;i<PREFS_SERVERS_MAX;i++) if(!prefs_server_equal(&a->servers[i],&b->servers[i])) return 0;
@@ -272,10 +338,26 @@ static int prefs_ui_equal(const Prefs *a,const Prefs *b)
     for(i=0;i<b->extra_count;i++) if(!strncmp(b->extra[i].key,"plugin.",7) && strcmp(b->extra[i].value,prefs_extra(a,b->extra[i].key,""))) return 0;
     return 1;
 }
+static void prefs_panel_low_resource(PrefsPanel *panel)
+{
+    prefs_low_resource(panel->plugin_draft);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_MEMLOW],panel->win,NULL,GA_Selected,TRUE,TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_REALTIME],panel->win,NULL,GA_Selected,TRUE,TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_CACHE],panel->win,NULL,GA_Selected,TRUE,TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_AVATARS],panel->win,NULL,GA_Selected,FALSE,TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_EMOJI],panel->win,NULL,GA_Selected,FALSE,TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_AUTOIMAGES],panel->win,NULL,GA_Selected,FALSE,TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_MEMCOUNT],panel->win,NULL,STRINGA_TextVal,(ULONG)"100",TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_MEMIMAGE],panel->win,NULL,STRINGA_TextVal,(ULONG)"256",TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_PREVIEWSIZE],panel->win,NULL,STRINGA_TextVal,(ULONG)"160",TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_INTERVAL],panel->win,NULL,STRINGA_TextVal,(ULONG)"60",TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_BACKGROUND],panel->win,NULL,STRINGA_TextVal,(ULONG)"300",TAG_END);
+    SetGadgetAttrs((struct Gadget *)panel->field[P_SPACING],panel->win,NULL,STRINGA_TextVal,(ULONG)"1500",TAG_END);
+}
 static void __attribute__((unused)) preferences_window(void)
 {
     PrefsPanel panel; Prefs next; int done = 0, save = 0,section=0,dirty=0,temporary=0; char caption[160];
-    static const char *titles[] = {"AmiRocket Preferences - General", "AmiRocket Preferences - Appearance", "AmiRocket Preferences - Plugins", "AmiRocket Preferences - Helpers", "AmiRocket Preferences - Diagnostics", "AmiRocket Preferences - About", "AmiRocket Preferences - Servers"};
+    static const char *titles[] = {"AmiRocket Preferences - General", "AmiRocket Preferences - Appearance", "AmiRocket Preferences - Plugins", "AmiRocket Preferences - Helpers", "AmiRocket Preferences - Diagnostics", "AmiRocket Preferences - About", "AmiRocket Preferences - Servers", "AmiRocket Preferences - Network", "AmiRocket Preferences - Memory","AmiRocket Preferences - Notifications"};
     if (!prefs_panel_build(&panel)) return;
     if(prefs_load(&next)==0) { prefs_migrate_servers(&next); temporary=!prefs_ui_equal(&G.prefs,&next); }
     G.panel_depth++;
@@ -288,11 +370,25 @@ static void __attribute__((unused)) preferences_window(void)
                 int key=result&WMHI_KEYMASK; if(key==0x45) { done=1; continue; }
                 if(key==0x54) id=303; else if(key==0x55) id=301; else continue;
             } else if ((result & WMHI_CLASSMASK) != WMHI_GADGETUP) continue;
-            if (id >= 100 && id <= 106) {
+            if (id >= 100 && id <= 109) {
                 section=id-100; prefs_panel_select(&panel, section);
+            } else if(id==239) {SetGadgetAttrs((struct Gadget *)panel.field[P_SOUND],panel.win,NULL,STRINGA_TextVal,(ULONG)"PROGDIR:Sounds/Notification.8svx",TAG_END);
+            } else if(id==238) {notification_sound_play(str_of(panel.field[P_SOUND]));
+            } else if(id==293) {
+                char report[2400];snprintf(report,sizeof(report),"AmiRocket " AR_VERSION " network report\n%s",panel.diagnostics);
+                if(!clipboard_write(report))request("Diagnostics","Could not copy the report.");
+                else SetGadgetAttrs((struct Gadget *)panel.diagnostic_copy,panel.win,NULL,GA_Text,(ULONG)"Report copied",TAG_END);
+            } else if(id==309) {
+                prefs_panel_low_resource(&panel);
             } else if(id==280) {
                 ULONG row=~0UL; GetAttr(LISTBROWSER_Selected,panel.server_list,&row);
                 if(row<(ULONG)panel.server_count) panel.server_selected=panel.server_slots[row];
+            } else if(id==292) {
+                SetGadgetAttrs((struct Gadget *)panel.diagnostic_copy,panel.win,NULL,GA_Text,(ULONG)"Copy diagnostic report",TAG_END);
+                if(!prefs_runtime_network(panel.diagnostics,sizeof(panel.diagnostics))) ar_strlcpy(panel.diagnostics,"Client is not running.",sizeof(panel.diagnostics));
+                SetAttrs(panel.network_label,LABEL_Text,(ULONG)panel.diagnostics,TAG_END);
+                RethinkLayout((struct Gadget *)panel.root,panel.win,NULL,TRUE);
+                RefreshGList((struct Gadget *)panel.root,panel.win,NULL,1);
             } else if(id==281 || id==282) prefs_server_edit(&panel,id==281);
             else if(id==283 && panel.server_selected>=0) {
                 memset(&panel.plugin_draft->servers[panel.server_selected],0,sizeof(ServerPrefs));
@@ -314,7 +410,7 @@ static void __attribute__((unused)) preferences_window(void)
             } else if(id==262) {
                 prefs_plugin_settings(&panel);
             } else if (id == 301 || id == 303) {
-                if (!prefs_panel_read(&panel, &next)) request("Preferences", "Use a poll interval of 2-600 seconds and font size of 8-48.");
+                if (!prefs_panel_read(&panel, &next)) request("Preferences", "Check preference ranges:\nPoll 2-600s; font 8-48; gap 100-5000ms; idle 15-600s.\nMemory: 50-1000 messages, images 256-8192 KiB.");
                 else if (id == 303 && !prefs_runtime_send(&next,0)) request("Preferences", "Use needs a running AmiRocket client. Save also works while the client is closed.");
                 else { save = id == 301 ? 1 : 2; done = 1; }
             } else if (id == 302) done = 1;
@@ -405,38 +501,46 @@ static void new_conversation(int mode)
     G.panel_depth--; DisposeObject(obj);
 }
 
+static void transfer_cancel_current(Object *cancel)
+{
+    if(G.transfer_cancelled)return;
+    G.transfer_cancelled=1;worker_cancel_transfer(G.active_server,G.transfer_serial);
+    SetGadgetAttrs((struct Gadget *)cancel,G.transfer_win,NULL,GA_Disabled,TRUE,TAG_END);
+    SetGadgetAttrs((struct Gadget *)G.transfer_text,G.transfer_win,NULL,GA_Text,(ULONG)"Cancelling...",TAG_END);
+}
 /* A modal progress window leaves the worker running and pumps its replies. */
 static void transfer_dialog(NetMsg *first)
 {
     Object *obj,*root,*cancel; struct Window *win; char *url=ar_strdup(first->a_url),*path=ar_strdup(first->a_text?first->a_text:"");
-    int preview=first->a_verify,retry=1,save=0,kind=first->kind,image_generation=first->a_interval;
+    int preview=first->a_verify,retry=1,save=0,kind=first->kind,image_generation=first->a_interval; ar_ms budget=first->a_before;
     root=VLayoutObject, LAYOUT_SpaceOuter,TRUE, LAYOUT_VertSpacing,6,
         LAYOUT_AddChild,G.transfer_text=panel_button(701,"Connecting / waiting for server..."),
-        LAYOUT_AddChild,panel_text(kind==NC_IMAGE?"Preview limits: 2 MiB / 1 million pixels.\nCancel waits for the current network read (up to 30 seconds).":"Maximum file size: 8 MiB.\nCancel waits for the current network read (up to 30 seconds)."),
+        LAYOUT_AddChild,G.transfer_gauge=FuelGaugeObject,FUELGAUGE_Min,0,FUELGAUGE_Max,100,FUELGAUGE_Level,0,FUELGAUGE_Percent,TRUE,End,CHILD_MinHeight,18,CHILD_WeightedHeight,0,
+        LAYOUT_AddChild,panel_text(kind==NC_IMAGE?(G.prefs.low_memory?"Preview limits: 2 MiB / 250,000 pixels.\nCancel stops the transfer; partial files are not saved.":"Preview limits: 2 MiB / 1 million pixels.\nCancel stops the transfer; partial files are not saved."):(budget>0 && budget<=2UL*1024*1024?"Maximum file size: 2 MiB.\nCancel stops the transfer; partial files are not saved.":"Maximum file size: 8 MiB.\nCancel stops the transfer; partial files are not saved.")),
         LAYOUT_AddChild,cancel=panel_button(702,"Cancel"), End;
-    obj=panel_window(root,"Download attachment",390); win=obj?RA_OpenWindow(obj):NULL;
-    if(!win || !url || !path) { if(kind==NC_IMAGE) image_loading_done(first->a_url); if(obj) DisposeObject(obj); else if(root) DisposeObject(root); netmsg_free(first); ar_free(url); ar_free(path); G.transfer_text=NULL; return; }
+    obj=panel_window(root,kind==NC_UPLOAD?"Upload attachment":"Download attachment",390); win=obj?RA_OpenWindow(obj):NULL;
+    if(!win || !url || !path) { if(kind==NC_IMAGE) image_loading_done(first->a_url); if(obj) DisposeObject(obj); else if(root) DisposeObject(root); netmsg_free(first); ar_free(url); ar_free(path); G.transfer_text=NULL;G.transfer_gauge=NULL; return; }
     G.panel_depth++; G.transfer_dialog=1; G.transfer_win=win;
     while(retry && !G.quit) {
         NetMsg *m=first; first=NULL;
-        if(!m) { m=netmsg_new(kind); if(m) { m->a_url=ar_strdup(url); m->a_text=ar_strdup(path); m->a_verify=preview; m->a_interval=image_generation; } }
+        if(!m) { m=netmsg_new(kind); if(m) { m->a_url=ar_strdup(url); m->a_text=ar_strdup(path); m->a_verify=preview; m->a_interval=image_generation; m->a_before=budget; } }
         if(!m || !m->a_url || (kind==NC_DOWNLOAD && !m->a_text)) { netmsg_free(m); break; }
         G.transfer_serial++; if(!G.transfer_serial) G.transfer_serial++;
+        G.transfer_started=amiga_local_ms();
         m->sent_at=G.transfer_serial; G.download_pending=1; G.transfer_rc=RC_OK;
         G.transfer_cancelled=G.transfer_save_offer=0; G.transfer_status[0]=0;
         SetGadgetAttrs((struct Gadget *)G.transfer_text,win,NULL,GA_Text,(ULONG)"Connecting / waiting for server...",GA_ReadOnly,TRUE,TAG_END);
         SetGadgetAttrs((struct Gadget *)cancel,win,NULL,GA_Disabled,FALSE,TAG_END);
+        SetGadgetAttrs((struct Gadget *)G.transfer_gauge,win,NULL,FUELGAUGE_Level,0,TAG_END);
         send_cmd(m);
         while(G.download_pending) {
             ULONG r; UWORD code;
             while((r=RA_HandleInput(obj,&code))!=WMHI_LASTMSG) {
-                if((r&WMHI_CLASSMASK)==WMHI_CLOSEWINDOW || ((r&WMHI_CLASSMASK)==WMHI_GADGETUP && (r&WMHI_GADGETMASK)==702)) {
-                    G.transfer_cancelled=1; worker_cancel_transfer(G.active_server,G.transfer_serial);
-                    SetGadgetAttrs((struct Gadget *)cancel,win,NULL,GA_Disabled,TRUE,TAG_END);
-                    SetGadgetAttrs((struct Gadget *)G.transfer_text,win,NULL,GA_Text,(ULONG)"Cancelling...",TAG_END);
+                if((r&WMHI_CLASSMASK)==WMHI_CLOSEWINDOW || ((r&WMHI_CLASSMASK)==WMHI_RAWKEY && (r&WMHI_KEYMASK)==0x45) || ((r&WMHI_CLASSMASK)==WMHI_GADGETUP && (r&WMHI_GADGETMASK)==702)) {
+                    transfer_cancel_current(cancel);
                 }
             }
-            panel_wait(obj);
+            if(G.download_pending) panel_wait(obj);
             if(G.quit) worker_cancel_transfer(G.active_server,G.transfer_serial);
         }
         retry=0;
@@ -444,15 +548,17 @@ static void transfer_dialog(NetMsg *first)
             struct EasyStruct es={sizeof(es),0,(STRPTR)"Image cannot be previewed",(STRPTR)"%s",(STRPTR)"Save attachment...|Close"};
             save=EasyRequest(win,&es,NULL,(ULONG)G.transfer_status)==1;
         } else if(G.transfer_rc!=RC_OK && !G.quit && !G.transfer_cancelled && strcmp(G.transfer_status,"Download cancelled")) {
-            struct EasyStruct es={sizeof(es),0,(STRPTR)"Download failed",(STRPTR)"%s",(STRPTR)"Retry|Close"};
-            retry=EasyRequest(win,&es,NULL,(ULONG)G.transfer_status)==1;
+            struct EasyStruct es={sizeof(es),0,(STRPTR)(kind==NC_UPLOAD?"Upload failed or unconfirmed":"Download failed"),(STRPTR)"%s",(STRPTR)(kind==NC_UPLOAD?"Close":"Retry|Close")};
+            retry=EasyRequest(win,&es,NULL,(ULONG)G.transfer_status)==1 && kind!=NC_UPLOAD;
         }
     }
-    G.panel_depth--; G.transfer_dialog=0; G.transfer_win=NULL; G.transfer_text=NULL;
+    G.panel_depth--; G.transfer_dialog=0; G.transfer_win=NULL; G.transfer_text=NULL;G.transfer_gauge=NULL;
     if(kind==NC_IMAGE) image_loading_done(url);
     DisposeObject(obj);
     if(save) { int i,f,done=0; for(i=0;i<G.msgs.count && !done;i++) for(f=0;f<G.msgs.items[i].file_count;f++)
-        if(!strcmp(url,G.msgs.items[i].files[f].url)) { done=1; download_attachment(i,f); break; } }
+        if(!strcmp(url,G.msgs.items[i].files[f].url) || !strcmp(url,rc_attachment_preview_url(&G.msgs.items[i].files[f]))) { done=1; download_attachment(i,f); break; } }
     ar_free(url); ar_free(path);
     handle_preferences(); arexx_handle();
 }
+
+#include "conversation_tools.inc"

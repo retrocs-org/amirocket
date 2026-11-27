@@ -122,6 +122,7 @@ int rc_download(RcClient *c,const char *url,Buf *data)
             if(external_ready) http_close(&external);
             http_init(&external,c->http.net,origin.host,origin.port,origin.tls,c->http.opt.verify);
             external.progress=c->http.progress; external.progress_ctx=c->http.progress_ctx;
+            external.body_write=c->http.body_write;external.body_write_ctx=c->http.body_write_ctx;
             external_ready=1; http=&external;
         }
         saved_max=http->max_body; http->max_body=c->http.transfer_limit?c->http.transfer_limit:8UL*1024UL*1024UL;
@@ -148,6 +149,15 @@ int rc_download(RcClient *c,const char *url,Buf *data)
 done:
     if(external_ready) http_close(&external);
     buf_free(&path); buf_free(&next_path); buf_free(&hdr); http_response_free(&response); return rc;
+}
+
+int rc_download_to(RcClient *c,const char *url,int (*write)(void *,const void *,size_t),void *ctx)
+{
+    Buf empty;int rc;buf_init(&empty);
+    c->http.body_write=write;c->http.body_write_ctx=ctx;
+    rc=rc_download(c,url,&empty);
+    c->http.body_write=NULL;c->http.body_write_ctx=NULL;
+    buf_free(&empty);return rc;
 }
 
 /* ---- dates --------------------------------------------------------- */
@@ -375,7 +385,7 @@ static int parse_msg(const JDoc *d, int o, RcMsg *m)
             f->title = dup_field(d, a, "title");
             if (!f->title) f->title = ar_strdup(m->attachment ? m->attachment : "attachment");
             f->image = image != NULL || !json_is_null(d, json_get(d, a, "image_url"));
-            ar_free(image);
+            f->preview_url = image;
         }
     }
     if(m->file_count==1 && !m->files[0].size) {
@@ -403,9 +413,9 @@ static int parse_msg(const JDoc *d, int o, RcMsg *m)
     {   /* "reactions": { ":heart_eyes:": { "usernames": [...] }, ... } */
         int rx = json_get(d, o, "reactions");
         if (json_type(d, rx) == JT_OBJECT && json_size(d, rx) > 0) {
-            Buf rb;
+            Buf rb,actors;
             int i = rx + 1, k;
-            buf_init(&rb);
+            buf_init(&rb);buf_init(&actors);
             for (k = 0; k < json_size(d, rx); k++) {
                 char code[64];
                 int val = i + 1, users = json_get(d, val, "usernames");
@@ -417,12 +427,18 @@ static int parse_msg(const JDoc *d, int o, RcMsg *m)
                     if (rb.len)
                         buf_putc(&rb, '\n');
                     buf_printf(&rb, "%s %d", c, json_type(d, users) == JT_ARRAY ? json_size(d, users) : 1);
+                    {int actor=json_first(d,users);char name[96];
+                     while(json_type(d,users)==JT_ARRAY && actor>=0 && actor<d->t[users].next && actors.len<4096) {
+                        if(json_str(d,actor,name,sizeof(name))>0 && !strpbrk(name,"\t\r\n"))buf_printf(&actors,"%s\t%s\n",c,name);
+                        actor=json_next(d,actor);
+                     }}
                 }
                 i = d->t[val].next;
             }
             if (rb.len)
                 m->reactions = buf_detach(&rb);
-            buf_free(&rb);
+            if(actors.len)m->reaction_users=buf_detach(&actors);
+            buf_free(&actors);buf_free(&rb);
         }
     }
     if (!m->text || !m->username) {
@@ -812,7 +828,7 @@ out:
     return rc;
 }
 
-int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo)
+static int rc_send_keyed(RcClient *c, const char *rid, const char *tmid, const char *text,const char *id, RcMsgList *echo)
 {
     Buf body;
     RcResp r;
@@ -825,6 +841,8 @@ int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo)
     json_put_string(&body, rid);
     buf_puts(&body, ",\"msg\":");
     json_put_string(&body, text);
+    if(id && *id) {buf_puts(&body,",\"_id\":");json_put_string(&body,id);}
+    if(tmid && *tmid) { buf_puts(&body,",\"tmid\":"); json_put_string(&body,tmid); }
     buf_puts(&body, "}}");
     if (body.oom) {
         buf_free(&body);
@@ -847,6 +865,77 @@ int rc_send(RcClient *c, const char *rid, const char *text, RcMsgList *echo)
     }
     resp_free(&r);
     return rc;
+}
+
+int rc_send_thread(RcClient *c,const char *rid,const char *tmid,const char *text,RcMsgList *echo)
+{ return rc_send_keyed(c,rid,tmid,text,NULL,echo); }
+int rc_send(RcClient *c,const char *rid,const char *text,RcMsgList *echo)
+{ return rc_send_keyed(c,rid,NULL,text,NULL,echo); }
+int rc_send_id(RcClient *c,const char *rid,const char *text,const char *id,RcMsgList *echo)
+{
+    if(!id || !*id || strlen(id)>95 || strspn(id,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")!=strlen(id))return RC_ERR_ARGS;
+    return rc_send_keyed(c,rid,NULL,text,id,echo);
+}
+int rc_confirm_send(RcClient *c,const char *rid,const char *text,const char *id,RcMsgList *echo)
+{
+    Buf path;RcResp r;int rc,o,u;char uid[64];RcMsg msg;
+    if(!rid || !text || !id || !*id)return RC_ERR_ARGS;
+    buf_init(&path);buf_puts(&path,"/api/v1/chat.getMessage?msgId=");url_encode(&path,id);
+    resp_init(&r);rc=path.oom?RC_ERR_NOMEM:rc_call(c,"GET",buf_str(&path),NULL,1,&r);
+    if(rc==RC_OK){o=json_get(&r.doc,0,"message");u=json_get(&r.doc,o,"u");
+        if(o<0 || json_str(&r.doc,json_get(&r.doc,u,"_id"),uid,sizeof(uid))<=0 || strcmp(uid,c->user_id) || parse_msg(&r.doc,o,&msg)<0)rc=RC_ERR_PROTO;
+        else {if(strcmp(msg.id,id) || strcmp(msg.rid,rid) || strcmp(msg.text,text))rc=RC_ERR_PROTO;
+            else if(echo){if(list_push_msg(echo,&msg)<0)rc=RC_ERR_NOMEM;else memset(&msg,0,sizeof(msg));}
+            rc_msg_free(&msg);
+        }
+    }
+    resp_free(&r);buf_free(&path);return rc;
+}
+
+/* Explicit user actions only. Never retry a mutation after ambiguous delivery. */
+static int message_action(RcClient *c,const char *path,const char *rid,const char *id,const char *value,int add,RcMsgList *echo)
+{
+    Buf body; RcResp r; int rc; RcMsg msg;
+    if(!id || !*id || (rid && !*rid) || (value && !*value)) return RC_ERR_ARGS;
+    buf_init(&body); buf_puts(&body,"{");
+    if(rid) { buf_puts(&body,"\"roomId\":"); json_put_string(&body,rid); buf_puts(&body,",\"msgId\":"); }
+    else buf_puts(&body,"\"messageId\":");
+    json_put_string(&body,id);
+    if(value) { buf_puts(&body,rid?",\"text\":":",\"emoji\":"); json_put_string(&body,value); }
+    if(!rid) buf_puts(&body,add?",\"shouldReact\":true":",\"shouldReact\":false");
+    buf_puts(&body,"}"); if(body.oom) { buf_free(&body); return RC_ERR_NOMEM; }
+    resp_init(&r); rc=rc_call(c,"POST",path,buf_str(&body),1,&r); buf_free(&body);
+    if(rc==RC_OK && echo && parse_msg(&r.doc,json_get(&r.doc,0,"message"),&msg)==0) {
+        if(list_push_msg(echo,&msg)<0) { rc_msg_free(&msg); rc=RC_ERR_NOMEM; }
+    }
+    if(rc==RC_ERR_NET && c->http.sent) ar_strlcpy(c->err,"Action unconfirmed; refresh before retrying",sizeof(c->err));
+    resp_free(&r); return rc;
+}
+int rc_message_edit(RcClient *c,const char *rid,const char *id,const char *text,RcMsgList *echo)
+{ if(!rid || !text) return RC_ERR_ARGS; return message_action(c,"/api/v1/chat.update",rid,id,text,0,echo); }
+int rc_message_delete(RcClient *c,const char *rid,const char *id)
+{ if(!rid) return RC_ERR_ARGS; return message_action(c,"/api/v1/chat.delete",rid,id,NULL,0,NULL); }
+int rc_reaction_has(const RcMsg *m,const char *emoji,const char *user)
+{
+    const char *p=m?m->reaction_users:NULL;char key[180];size_t length;
+    if(!p || !emoji || !user)return 0;
+    snprintf(key,sizeof(key),"%s\t%s",emoji,user);length=strlen(key);
+    while(*p) {const char *end=strchr(p,'\n');size_t n=end?(size_t)(end-p):strlen(p);if(n==length && !memcmp(p,key,n))return 1;p=end?end+1:p+n;}
+    return 0;
+}
+int rc_message_react(RcClient *c,const char *id,const char *emoji,int add)
+{ if(!emoji || strlen(emoji)>64 || strpbrk(emoji," \r\n\t") || (add!=0 && add!=1)) return RC_ERR_ARGS; return message_action(c,"/api/v1/chat.react",NULL,id,emoji,add,NULL); }
+int rc_thread(RcClient *c,const char *tmid,int offset,RcMsgList *out,int *total)
+{
+    Buf path; RcResp r; int rc;
+    if(!tmid || !*tmid || offset<0 || offset>1000000) return RC_ERR_ARGS;
+    buf_init(&path); buf_puts(&path,"/api/v1/chat.getThreadMessages?tmid="); url_encode(&path,tmid);
+    buf_printf(&path,"&offset=%d&count=25&sort=%%7B%%22ts%%22%%3A1%%7D",offset);
+    if(path.oom) { buf_free(&path); return RC_ERR_NOMEM; }
+    resp_init(&r); rc=rc_call(c,"GET",buf_str(&path),NULL,1,&r);
+    if(rc==RC_OK) { rc=parse_msg_array(c,&r.doc,json_get(&r.doc,0,"messages"),out);
+      if(total) { long long n=json_ll(&r.doc,json_get(&r.doc,0,"total"),-1); *total=n<0?-1:n>1000000?1000000:(int)n; } }
+    resp_free(&r); buf_free(&path); return rc;
 }
 
 int rc_create_room(RcClient *c, char type, const char *name, const char *members, RcRoomList *out)
@@ -903,6 +992,95 @@ finish:
     buf_free(&body); buf_free(&users); return rc;
 invalid:
     rc = set_err(c, RC_ERR_ARGS, "Enter up to 32 comma-separated usernames", NULL); goto finish;
+}
+
+
+int rc_search(RcClient *c,const char *rid,const char *query,int offset,int count,RcMsgList *out,int *total)
+{
+    Buf path; RcResp r; int rc;
+    if(!rid || !*rid || !query || !*query || strlen(query)>256 || offset<0 || offset>1000000 || count<1 || count>50) return RC_ERR_ARGS;
+    buf_init(&path); buf_puts(&path,"/api/v1/chat.search?roomId="); url_encode(&path,rid);
+    buf_puts(&path,"&searchText="); url_encode(&path,query); buf_printf(&path,"&offset=%d&count=%d",offset,count);
+    resp_init(&r); rc=rc_call(c,"GET",buf_str(&path),NULL,1,&r);
+    if(rc==RC_OK) {
+        rc=parse_msg_array(c,&r.doc,json_get(&r.doc,0,"messages"),out);
+        if(total) { long long value=json_ll(&r.doc,json_get(&r.doc,0,"total"),-1); *total=value<0?-1:value>1000000?1000000:(int)value; }
+    }
+    resp_free(&r); buf_free(&path); return rc;
+}
+typedef struct { Buf prefix; size_t pos,left; int (*read)(void *,void *,int); void *ctx; int tail; char closing[96],marker[80]; int failure[80],matched,collision; } UploadStream;
+static int upload_stream(void *ctx,void *buffer,int count)
+{
+
+    UploadStream *s=ctx; size_t n;
+    if(s->pos<s->prefix.len) { n=s->prefix.len-s->pos; if(n>(size_t)count) n=count; memcpy(buffer,s->prefix.data+s->pos,n); s->pos+=n; return n; }
+    if(s->left) {
+        int got,i; unsigned char *bytes=buffer;
+        if((size_t)count>s->left) count=s->left;
+        got=s->read(s->ctx,buffer,count); if(got<=0 || got>count) return -1;
+        /* Abort rather than let arbitrary file bytes become multipart framing.
+         * KMP carries matches across chunks without buffering the file. */
+        for(i=0;i<got;i++) {
+            while(s->matched && bytes[i]!=(unsigned char)s->marker[s->matched]) s->matched=s->failure[s->matched-1];
+            if(bytes[i]==(unsigned char)s->marker[s->matched]) s->matched++;
+            if(!s->marker[s->matched]) { s->collision=1; return -1; }
+        }
+        s->left-=got; return got;
+    }
+    n=strlen(s->closing)-s->tail; if(n>(size_t)count) n=count;
+    memcpy(buffer,s->closing+s->tail,n); s->tail+=n; return n;
+}
+int rc_upload(RcClient *c,const char *rid,const char *filename,size_t length,
+              int (*read_file)(void *,void *,int),void *ctx,char file_id[96])
+{
+    static unsigned long sequence;
+    UploadStream stream; RcResp r; Buf path; int rc; const unsigned char *p; char boundary[64],type[128]; const char *mime="application/octet-stream",*extension;
+    file_id[0]=0;
+    if(!rid || !*rid || !filename || !*filename || strlen(filename)>255 || length>8UL*1024*1024 || !read_file) return RC_ERR_ARGS;
+    for(p=(const unsigned char *)filename;*p;p++) if(*p<32 || *p==127 || *p=='"' || *p=='\\') return RC_ERR_ARGS;
+    extension=strrchr(filename,'.');
+    if(extension) {
+        if(!ar_strncasecmp(extension,".png",5)) mime="image/png";
+        else if(!ar_strncasecmp(extension,".jpg",5) || !ar_strncasecmp(extension,".jpeg",6)) mime="image/jpeg";
+        else if(!ar_strncasecmp(extension,".gif",5)) mime="image/gif";
+        else if(!ar_strncasecmp(extension,".webp",6)) mime="image/webp";
+        else if(!ar_strncasecmp(extension,".pdf",5)) mime="application/pdf";
+        else if(!ar_strncasecmp(extension,".zip",5)) mime="application/zip";
+        else if(!ar_strncasecmp(extension,".txt",5) || !ar_strncasecmp(extension,".md",4) || !ar_strncasecmp(extension,".c",3) || !ar_strncasecmp(extension,".h",3)) mime="text/plain";
+    }
+    memset(&stream,0,sizeof(stream)); buf_init(&stream.prefix); stream.read=read_file; stream.ctx=ctx; stream.left=length;
+    snprintf(boundary,sizeof(boundary),"AmiRocket%08lx%08lx",++sequence,(unsigned long)rand()^(unsigned long)(c->http.last_date_ms/1000));
+    snprintf(stream.closing,sizeof(stream.closing),"\r\n--%s--\r\n",boundary);
+    snprintf(stream.marker,sizeof(stream.marker),"--%s",boundary);
+    { int i,j=0; for(i=1;stream.marker[i];i++) {
+        while(j && stream.marker[i]!=stream.marker[j]) j=stream.failure[j-1];
+        if(stream.marker[i]==stream.marker[j]) j++;
+        stream.failure[i]=j;
+    } }
+    snprintf(type,sizeof(type),"multipart/form-data; boundary=%s",boundary);
+    buf_printf(&stream.prefix,"--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n",boundary,filename,mime);
+    buf_init(&path); buf_puts(&path,"/api/v1/rooms.media/"); url_encode(&path,rid);
+    if(stream.prefix.oom || path.oom) { buf_free(&stream.prefix); buf_free(&path); return RC_ERR_NOMEM; }
+    c->http.upload_read=upload_stream; c->http.upload_ctx=&stream;
+    c->http.upload_length=stream.prefix.len+length+strlen(stream.closing);
+    c->http.upload_type=type;
+    resp_init(&r); rc=rc_call(c,"POST",buf_str(&path),NULL,1,&r);
+    c->http.upload_read=NULL; c->http.upload_ctx=NULL; c->http.upload_length=0; c->http.upload_type=NULL; c->http.upload_done=0;
+    if(stream.collision) rc=set_err(c,RC_ERR_ARGS,"Upload stopped safely: file data matched its multipart delimiter. Try again to create a different delimiter.",NULL);
+    if(rc==RC_OK && json_str(&r.doc,json_path(&r.doc,0,"file._id"),file_id,96)<=0) rc=set_err(c,RC_ERR_PROTO,"Upload response omitted file id",NULL);
+    if(rc!=RC_OK && !stream.collision && c->http.sent && !c->http.deferred) {
+        char detail[150]; ar_strlcpy(detail,c->err,sizeof(detail)); snprintf(c->err,sizeof(c->err),"Upload failed or unconfirmed: %.140s",detail);
+    }
+    resp_free(&r); buf_free(&path); buf_free(&stream.prefix); return rc;
+}
+int rc_upload_confirm(RcClient *c,const char *rid,const char *file_id)
+{
+    Buf path; RcResp r; int rc;
+    if(!rid || !*rid || !file_id || !*file_id) return RC_ERR_ARGS;
+    buf_init(&path); buf_puts(&path,"/api/v1/rooms.mediaConfirm/"); url_encode(&path,rid); buf_putc(&path,'/'); url_encode(&path,file_id);
+    resp_init(&r); rc=rc_call(c,"POST",buf_str(&path),"{}",1,&r);
+    if(rc!=RC_OK) { char detail[150]; ar_strlcpy(detail,c->err,sizeof(detail)); snprintf(c->err,sizeof(c->err),"File uploaded; sending failed or is unconfirmed. Check the chat before trying again. %.90s",detail); }
+    resp_free(&r); buf_free(&path); return rc;
 }
 
 int rc_mark_read(RcClient *c, const char *rid)
@@ -1035,9 +1213,9 @@ void rc_msg_free(RcMsg *m)
     ar_free(m->tmid);
     ar_free(m->attachment);
     { int i; for (i = 0; i < m->file_count; i++) {
-        ar_free(m->files[i].title); ar_free(m->files[i].url);
+        ar_free(m->files[i].title); ar_free(m->files[i].url); ar_free(m->files[i].preview_url);
     } ar_free(m->files); }
-    ar_free(m->reactions);
+    ar_free(m->reactions);ar_free(m->reaction_users);
     memset(m, 0, sizeof(*m));
 }
 
@@ -1273,3 +1451,6 @@ const char *rc_system_text(const char *type)
             return tab[i].s;
     return "(system event)";
 }
+
+const char *rc_attachment_preview_url(const RcAttachment *file)
+{ return file->preview_url && *file->preview_url?file->preview_url:file->url; }

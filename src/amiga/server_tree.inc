@@ -43,8 +43,8 @@ static void tree_rebuild(void)
     int slot; char user[96]; ar_strlcpy(user,G.username,sizeof(user)); side_clear(&G.side);
     for(slot=0;slot<PREFS_SERVERS_MAX;slot++) if(G.prefs.servers[slot].url[0]) {
         ServerState *s=&G.servers[slot]; SRow *row=side_add(&G.side); int i,unread=0,mentions=0;
-        int connected=(slot==G.active_server?G.connected:s->connected) && !s->last_error, busy=slot==G.active_server?G.busy:s->busy;
-        if(s->last_error) connected=0;
+        int connected=(slot==G.active_server?G.connected:s->connected) && (!s->last_error || s->cooling || s->health_retry), busy=slot==G.active_server?G.busy:s->busy;
+        if(s->last_error && !s->cooling && !s->health_retry) connected=0;
         const RcRoomList *rooms=slot==G.active_server?&G.rooms:&s->rooms;
         const char *rid=slot==G.active_server?G.cur_rid:s->cur_rid;
         if(!row) break;
@@ -53,8 +53,8 @@ static void tree_rebuild(void)
             if(rooms->items[i].mentions>0) mentions=1; }
         row->kind=SR_SERVER; row->server_slot=slot; row->collapsed=!s->expanded;
         row->selected=slot==G.active_server && G.server_view; row->bold=unread>0 || mentions;
-        row->connection_state=s->reconnecting?1:s->last_error?3:connected?2:busy?1:0;
-        snprintf(row->label,sizeof(row->label),"%s%s%s",server_display(slot),connected?"":" - ",connected?"":s->reconnecting?"reconnecting":busy?"connecting":s->last_error?"failed":"offline");
+        row->connection_state=(s->cooling || s->health_retry || s->reconnecting)?1:s->last_error?3:connected?2:busy?1:0;
+        { char health[96]; snprintf(row->label,sizeof(row->label),"%s - %s",server_display(slot),server_health(slot,health,sizeof(health))); }
         if(unread>0) { size_t n=strlen(row->label); snprintf(row->label+n,sizeof(row->label)-n," (%d)",unread); }
         if(!connected) continue;
         if(!s->expanded && !G.filter[0]) continue;

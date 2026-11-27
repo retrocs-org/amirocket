@@ -1,5 +1,5 @@
 /*
- * AmiRocket - settings in ENVARC:AmiRocket.prefs (legacy ENV: read fallback) (plain key=value).
+ * AmiRocket - settings in one selected AmiRocket.prefs file (default ENVARC:, legacy ENV: fallback) (plain key=value).
  *
  * With "remember" on, the Rocket.Chat user id and auth token are stored so
  * the next start logs in without a password. The password itself is never
@@ -14,6 +14,7 @@
 typedef struct {
     char url[256], name[96], user[96], user_id[64], token[128];
     int verify, remember, autoconnect;
+    int notify_mentions, quiet, sound;
 } ServerPrefs;
 #define PREFS_EXTRA_MAX 48
 typedef struct { char key[64], value[256]; } PrefsKey;
@@ -24,14 +25,21 @@ typedef struct {
     char token[128];
     int  verify;        /* verify TLS certificates */
     int  remember;
+    int low_memory, message_limit, image_cache_kib;
+    int request_spacing_ms, background_interval, avatar_disk_cache;
+    int realtime;      /* WebSocket notifications with REST fallback */
     int  interval;      /* poll interval in seconds */
     char theme[24];     /* theme id, see theme.c */
     int  ownscreen;     /* themes on their own screen instead of a Workbench window */
     char chat_font[128];
     int  chat_font_size;
     int  preview_images;
+    int external_images; /* full-size originals open outside the client */
+    int auto_thumbnails; /* visible thumbnails only; off means click-to-load */
+    int preview_width; /* 160, 320 or 640; aspect ratio retained */
     int  show_emoji, show_avatars, inline_images, open_links;
     char browser[128], image_viewer[128];
+    char cache_dir[256],download_dir[256],notification_sound[256];
     int  win_left, win_top, win_width, win_height;
     ServerPrefs servers[PREFS_SERVERS_MAX];
     int servers_defined; /* distinguishes an empty list from legacy settings */
@@ -39,6 +47,8 @@ typedef struct {
     PrefsKey extra[PREFS_EXTRA_MAX];
 } Prefs;
 
+int prefs_config_file(char *out,int size); /* one settings file; OS environment stores only its location */
+int prefs_config_override(const char *path); /* installer migration, this process only */
 void prefs_defaults(Prefs *p);
 void prefs_migrate_servers(Prefs *p);
 int prefs_server_validate(const ServerPrefs *server, char *error, int size);
@@ -47,9 +57,11 @@ int prefs_save_server(int slot,const ServerPrefs *server);
 int prefs_lock(void);
 void prefs_unlock(void);
 int  prefs_load(Prefs *p);    /* 0 success, -1 missing/unreadable, -2 unsupported size/key capacity */
-int  prefs_save(const Prefs *p); /* single persistent file: ENVARC:AmiRocket.prefs */
+int  prefs_save(const Prefs *p); /* single persistent file, resolved by prefs_config_file */
 int prefs_set(Prefs *p, const char *key, const char *value); /* validates editable UI/plugin keys */
 int prefs_get(const Prefs *p, const char *key, char *out, int size);
+void prefs_low_resource(Prefs *p);
+int prefs_resource_path(const Prefs *p, const char *path, char *out, int size);
 const char *prefs_extra(const Prefs *p, const char *key, const char *fallback);
 
 #endif

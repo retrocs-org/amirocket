@@ -4,6 +4,7 @@
 
 @{"Installation and upgrades" LINK INSTALL}
 @{"Everyday use" LINK USE}
+@{"Recovery, navigation and low-resource controls" LINK CONTROLS}
 @{"Preferences and plugins" LINK PREFS}
 @{"ARexx and dock integration" LINK REXX}
 @{"Uninstall" LINK REMOVE}
@@ -14,9 +15,18 @@ Requires AmigaOS 3.2, 68020+, a compatible bsdsocket.library TCP/IP stack,
 and AmiSSL 5.1 or newer for HTTPS. ReAction and picture datatypes come from
 AmigaOS. Additional image formats may require suitable picture datatypes.
 
-Extract the complete archive and double-click Install. Select Install/update
-and the parent drawer (default SYS:Utilities). AmiRocket and AmiRocketPrefs
-remain together in its AmiRocket drawer. Close both before updating.
+Extract the complete archive and double-click Install. Novice mode locates an
+existing installation automatically and offers Update or Uninstall. A fresh
+installation uses SYS:Utilities for the client and SYS:Prefs for
+AmiRocketPrefs, without directory prompts. Intermediate and Expert modes
+allow separate application and Preferences drawers. Expert mode also allows
+a drawer for the single AmiRocket.prefs configuration file. Close the
+client and Preferences before updating. Shared resources use SYS:AmiRocket;
+Expert mode can select another dedicated shared-data drawer. The manual is
+installed directly in HELP:.
+Application locations are recorded in the selected AmiRocket.prefs file.
+A small OS environment locator AmiRocket-ConfigFile holds only its filename.
+All client, Preferences and plugin settings remain in the same file.
 
 Updates preserve ENVARC:AmiRocket.prefs, custom icons and unrelated plugins.
 The installer never imports account settings from a distribution archive.
@@ -24,18 +34,47 @@ Launch AmiRocket from its Workbench icon. Per-server auto-connect preferences
 decide which servers connect when the client starts.
 
 Shell installation: CD to the extracted AmiRocket drawer, then execute:
- Execute scripts/Install-AmiRocket DEST=SYS:Utilities/AmiRocket
+ Execute scripts/Install-AmiRocket DEST=SYS:Utilities DATA=SYS:AmiRocket
 
 Shell launch: Stack 65536, then AmiRocket. Workbench icons request this stack.
+All three user levels offer Update / Uninstall when an installation is found;
+otherwise a fresh installation is performed. Use Install in the extracted
+release archive for maintenance.
+The installer launcher and Shell script are not copied into the installed app.
+After installation, a summary lists the client, Preferences and configuration
+paths on Installer's final page, without an Abort Install button. A setup option
+starts AmiRocket once after success; it creates no startup entry.
+Uninstall removes both executables from their selected drawers and offers
+Keep settings or Remove settings for the selected shared configuration file.
+
 @ENDNODE
 @NODE USE "Using AmiRocket"
+Installation selects the bundled notification chime automatically, including
+updates from the old blank setting. Custom sound choices are preserved.
+Preferences / Notifications selects a sound file and provides a Test sound
+button. Blank uses the system beep. Custom sounds use installed sound datatypes
+(for example 8SVX), are limited to 256 KiB, and are cached. Enable sounds per
+server in Servers / Edit. Quiet mode and mention-only rules still apply.
+The installer lets every user level set the default download drawer, starting
+with SYS:Downloads. Intermediate/Expert also choose the media cache drawer.
+Both paths can be changed later in Preferences / Helpers.
+
+Attachment cards show a shortened filename and size. Preview/Hide loads or
+collapses a thumbnail. Open uses the configured external image viewer; Save
+chooses a destination. Loading and failures stay on the card; use Retry after
+failure. Cached thumbnails reopen without downloading or decoding again.
+General preferences: disable thumbnail previews for text-only cards; enable
+Load visible thumbnails automatically for one-at-a-time server thumbnails.
+The default is click-to-load. Automatic mode never downloads originals and
+is disabled in low-memory mode. Default preview bounds are 320 by 180 pixels.
+
 Add servers in AmiRocketPrefs. Right-click a server to connect, disconnect,
 or edit it. Select its root for connection events and failures.
 
 Enter sends a message. Shift+Enter inserts a new line. Amiga+C/X/V provide
 clipboard editing. Select a received message and Amiga+C copies its text.
 Amiga+U selects the next unread room; Amiga+L jumps to the new-message marker.
-Unread rooms are bold; @ badges indicate mentions. Room history uses polling.
+Unread rooms are bold; @ badges indicate mentions. Room history uses WebSocket-triggered delta sync with polling fallback.
 
 Attachments display server-reported sizes. Click an image to expand it or
 use Room / Save selected attachment to save. Unsupported previews offer Save.
@@ -45,14 +84,90 @@ Cancellation may wait for the current network read, up to 30 seconds.
 If delivery is unconfirmed, check the conversation before resending. AmiRocket
 never automatically replays a message after a lost response. Drafts are kept.
 Project / Iconify (Amiga+H) keeps connections active behind a Workbench icon.
+Server roots and the header show health and retry countdowns. Click a server
+root for the detailed connection-event history.
+
+Room / Search this conversation (Amiga+F), or Find, searches up to 25 results per
+page. Select a result to read/copy its text. Previous/Next page through hits.
+File, or Room / Upload attachment, streams a file up to 8 MiB with progress
+and cancellation. The selected file is sent separately; composer text remains
+a draft. Check the chat before retrying an unconfirmed upload.
+
+Drafts checkpoint every two seconds and on conversation/server switches.
+AmiRocket.drafts in the shared-data drawer contains private recovery data for up to 64 private draft/delivery records,
+scoped to server/account/conversation. It is not a configuration file and is
+never packaged. Updates preserve it. Close the client before deleting it.
+Failed disk writes keep data in memory; an unsafe switch is blocked.
+Drag the horizontal divider above the input to resize it. The client
+remembers its height in AmiRocket.prefs alongside your window settings.
+
+Right-click a message or select it and press Amiga+T for message actions.
+Quote inserts text into your draft. Load thread shows paged replies.
+Reply in thread sends the separate editor's text to that thread. Select a
+reply to act on it. Load for editing copies your own selected message;
+Save edit submits it. Delete own message requires confirmation. Reaction
+shortcodes such as smile have explicit Add and Remove buttons.
+Workspace permissions and edit/delete time limits still apply. Failed or
+unconfirmed actions retain their text and are never automatically retried.
+
+AmiRocketPrefs > Servers > Edit offers per-server mentions-only alerts,
+notification beep/flash and Quiet mode. Quiet mode keeps unread badges
+while suppressing message alerts and message events to plugins/docks.
+Use applies immediately; Save also writes the same configuration file.
+Restart client and Preferences after installing an updated build.
+
+Image previews use the server's image URL; Save attachment retains the
+original file URL. Enable Rocket.Chat server thumbnails (480x360 is suitable).
+Preferences > General > Preview width accepts 160, 320 or 640. Low-memory
+mode caps previews at 160x120. Images retain their aspect ratio. Use applies
+immediately; Save also persists this in the shared preferences file.
+Previews are cached in memory for reopening. A missing server thumbnail still
+requires the original to fit the existing memory and format limits.
+
+Full-size images open externally by default. Set the program in Preferences
+> Helpers > Image viewer executable (default SYS:Utilities/MultiView).
+With Open full-size images in external viewer enabled, click an expanded
+thumbnail to open its original without a Save requester. Image labels toggle
+server thumbnails; if no separate thumbnail exists, the original opens outside.
+Room > Open selected image externally also opens the selected original.
+
+Originals are not decoded in AmiRocket. Up to four temporary originals share
+an 8 MiB budget (2 MiB in low-memory mode); cached originals reopen without
+another download. Files remain in T: while viewers may need them, including
+after the client exits. Close viewers before Room > Clear temporary image
+files. Use Save attachment when you want to choose a permanent location.
+
 @ENDNODE
 @NODE PREFS "Preferences and plugins"
-Launch AmiRocketPrefs beside the client. Use applies settings for this session;
-Save also writes ENVARC:AmiRocket.prefs. It is the single configuration file
+Launch AmiRocketPrefs from SYS:Prefs or from the client menu. Use applies settings for this session;
+Save also writes the selected AmiRocket.prefs file. It is the single configuration file
 for servers, appearance, performance, helpers and plugin options.
+
+Network enables realtime WebSocket event subscriptions by default.
+Disable Realtime WebSocket updates for polling only. Live events coalesce
+into delta syncs; periodic catch-up handles missed events. Lost streams
+reconnect with backoff; sends are never automatically replayed.
+Network sets a per-server request gap (default 1000 ms), idle polling (30s)
+and a 24-hour avatar disk cache. Use applies now; Save also keeps these values.
+Room lists refresh at most every 30s, foreground presence every 60s. Hidden
+or idle conversations poll less often. Searches and name suggestions are local.
+429/503 Retry-After pauses all requests to that server; failures back off with
+jitter. User actions have priority over avatar/presence work; sends are never
+replayed automatically. Disconnect cancels queued operations.
+Diagnostics / Refresh network statistics shows requests/min, queue, cooldown,
+last HTTP status, errors, rate limits and cache hits (sampled every 5 seconds).
+Avatar cache: PROGDIR:Cache/Avatars, up to 8 MiB image data in 64 slots.
+Disable caching or delete that drawer to clear it. Configuration stays in the
+single preferences file; cache entries are not settings.
 
 Remember login saves an authentication token, never the password. Log out and
 forget login revokes the token. Do not share your personal configuration file.
+
+Memory sets chat retention (50-1000 messages per server) and encoded image
+cache size (256-8192 KiB). Low-memory mode caps retention at 200, disables
+avatar downloads and emoji drawing, keeps two previews / 512 KiB encoded data,
+and limits downloads to 2 MiB. Room / Clear media caches clears RAM media and
+the disk avatar cache where writable. Use applies now; Save also persists.
 
 Timestamp and Quick Reply are bundled, disabled unless explicitly enabled.
 The separately distributed plugin SDK contains headers, source examples and
@@ -69,12 +184,12 @@ AmiRocketMonitor. Ctrl-C exits. Rexx/ contains ready-to-adapt scripts.
 A real NovaDock widget still needs its own integration and rendering tests.
 @ENDNODE
 @NODE REMOVE "Uninstall"
-From an extracted release drawer, double-click Install and select the parent
-of the installed AmiRocket drawer. An existing copy offers Update or Uninstall.
+From an extracted release drawer, double-click Install. Novice mode locates
+the installed AmiRocket drawer and offers Update or Uninstall.
 Uninstall then offers Keep settings (default) or Remove settings. The installer removes
 only its known managed files and any owned startup entry from older installers.
 
-Keep settings preserves ENVARC:AmiRocket.prefs. Remove settings deletes this
+Keep settings preserves the selected AmiRocket.prefs file. Remove settings deletes this
 shared file and the old ENV fallback, including all saved server tokens and
 plugin options for every installation. Unrelated files/plugins are always kept.
 The drawer may remain when custom files are present. To forget accounts, use Log out and
@@ -90,4 +205,27 @@ The Source drawer in the runtime archive and the versioned source ZIP contain th
 corresponding source, Makefile, SDK, release scripts and regression tests.
 README.md and docs/RELEASING.md document rebuilding. VERSION identifies this
 release; BUILD-PROVENANCE.json records exact native input/output hashes.
+
+@ENDNODE
+@NODE CONTROLS "Recovery, navigation and low-resource controls"
+Release 0.2 controls:
+ First unread: explicitly load older history to the read boundary, bounded by
+ the configured message limit. Escape stops further history paging.
+ Ctrl+Tab / Ctrl+Shift+Tab: next / previous visible conversation.
+ Ctrl+K: search conversations; Enter opens the first match.
+ Ctrl+U: next unread conversation. Escape closes secondary windows.
+
+Failed composer sends keep their draft and delivery ID in private recovery data.
+Retry send checks delivery before reusing the original ID. Recovery survives a
+restart; there is no automatic replay. Editing an unconfirmed draft asks before
+using a new ID. Room / Forget unconfirmed delivery keeps the text but discards
+its ID after confirmation; check history first to avoid a duplicate new send.
+
+Memory / Use low-resource preset stages smaller caches and previews, fewer
+retained messages, disabled automatic images/avatars/emoji and slower polling.
+Use or Save applies it without changing server accounts or custom drawers.
+Diagnostics / Copy diagnostic report copies counters and fixed diagnoses without
+credentials, URLs or message text. Transfers show speed and ETA when known;
+Escape cancels the transfer. Short action feedback appears in the chat header.
+
 @ENDNODE

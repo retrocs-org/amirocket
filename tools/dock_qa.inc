@@ -1,10 +1,13 @@
+#include "qa_observation.h"
 /* Real separately launched monitor/client processes, only in disposable profiles. */
 static char dock_log[16384];
 static const char *qa_dock_read(const char *path)
 {
-    BPTR file=Open(path,MODE_OLDFILE); LONG n;
-    dock_log[0]=0; if(!file) return NULL;
-    n=Read(file,dock_log,sizeof(dock_log)-1); Close(file); if(n<0) return NULL; dock_log[n]=0;
+    BPTR file; LONG n;
+    if(!qa_observation_take()) return NULL;
+    file=Open(path,MODE_OLDFILE);
+    dock_log[0]=0; if(!file) { qa_observation_release(); return NULL; }
+    n=Read(file,dock_log,sizeof(dock_log)-1); Close(file); qa_observation_release(); if(n<0) return NULL; dock_log[n]=0;
     return dock_log;
 }
 static void qa_dock_pump(void)
@@ -25,6 +28,7 @@ static int qa_dock_state(const char *state,int ticks)
         }
         qa_dock_pump();
     }
+    printf("Dock state timeout: expected %s; last snapshot: %s\n",state,qa_dock_read("T:ARDockState"));
     return 0;
 }
 static int qa_dock_port(const char *name,int present,int ticks)

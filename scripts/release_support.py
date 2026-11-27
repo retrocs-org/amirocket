@@ -1,4 +1,4 @@
-"""Local, deterministic source selection and stored LHA packaging for releases."""
+"""Local source selection and timestamped LHA/ZIP packaging for releases."""
 import hashlib
 import json
 import os
@@ -6,6 +6,7 @@ import re
 import struct
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -80,6 +81,8 @@ def source_files(root):
             rel = (relbase / name).as_posix()
             if name in SKIP_DIRS or rel in excluded or name in GENERATED or path.suffix.lower() in SKIP_SUFFIXES:
                 continue
+            if name.lower().startswith('amirocket.drafts'):
+                raise ReleaseError('Private draft recovery data outside work/: ' + rel)
             if name.startswith('.env') or path.suffix.lower() in {'.pem', '.key', '.p12', '.pfx'} or name in {'.netrc', '.npmrc', '.pypirc', '.git-credentials', 'id_rsa', 'id_ed25519', 'credentials', 'release-config.json', 'AmiRocket.prefs'}:
                 # Only the committed placeholder example belongs in the source archive.
                 if rel != 'examples/release-config.json':
@@ -96,10 +99,21 @@ def source_files(root):
 def fingerprint(files):
     return hashlib.sha256(canonical(files)).hexdigest()
 
-def zip_write(path, entries):
+def archive_clock(timestamp=None):
+    """One current local DOS time per archive (the format stores two-second precision)."""
+    epoch = int(time.time() if timestamp is None else timestamp)
+    date = time.localtime(epoch)[:6]
+    if not 1980 <= date[0] <= 2107:
+        raise ReleaseError('System clock is outside the archive date range (1980-2107)')
+    date = date[:5] + (date[5] // 2 * 2,)
+    dos = ((date[0]-1980)<<25) | (date[1]<<21) | (date[2]<<16) | (date[3]<<11) | (date[4]<<5) | (date[5]//2)
+    return epoch, date, dos
+
+def zip_write(path, entries, timestamp=None):
+    _, date, _ = archive_clock(timestamp)
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, data, executable in sorted(entries):
-            info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+            info = zipfile.ZipInfo(name, date)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3
             info.external_attr = (0o100755 if executable else 0o100644) << 16
@@ -143,14 +157,15 @@ def lha_environment():
     return {key:value for key,value in os.environ.items()
             if not key.upper().endswith(('_TOKEN','_PASSWORD','_SECRET'))}
 
-def lha_write(path, entries, tool=None):
+def lha_write(path, entries, tool=None, timestamp=None):
     """LHA level 0, -lh0- stored members. No external compressor required."""
+    epoch, _, dos = archive_clock(timestamp)
     if tool:
         with tempfile.TemporaryDirectory(dir=path.parent) as directory:
             stage=Path(directory)
             for name,data in entries.items():
                 target=stage/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
-                os.utime(target,(315532800,315532800))
+                os.utime(target,(epoch,epoch))
             result=subprocess.run([tool,'ao5g0q2',str(path.resolve()),*sorted(entries)],cwd=stage,capture_output=True,env=lha_environment())
             if result.returncode:
                 raise ReleaseError('LHA compression failed')
@@ -160,8 +175,8 @@ def lha_write(path, entries, tool=None):
             encoded = name.replace('/', '\\').encode('ascii')
             if len(encoded) > 233 or len(data) > 0xffffffff:
                 raise ReleaseError('LHA member exceeds level-0 limits')
-            # Fixed DOS timestamp: 1980-01-01. Attribute 0x20 is a regular file.
-            body = b'-lh0-' + struct.pack('<III', len(data), len(data), 0x00210000)
+            # Current local DOS timestamp. Attribute 0x20 is a regular file.
+            body = b'-lh0-' + struct.pack('<III', len(data), len(data), dos)
             body += bytes((0x20, 0, len(encoded))) + encoded + struct.pack('<H', crc16(data))
             stream.write(bytes((len(body), sum(body) & 255)) + body + data)
         stream.write(b'\0')

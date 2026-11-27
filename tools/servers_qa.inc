@@ -10,7 +10,9 @@ static void qa_servers(int show)
     QA(next->servers_defined && next->servers[0].autoconnect && !strcmp(next->servers[0].token,"first-token"));
     next->servers[1]=next->servers[0]; strcpy(next->servers[1].url,"https://chat.two.test"); strcpy(next->servers[1].token,"second-token"); next->servers[1].autoconnect=0;
     QA(prefs_server_validate(&next->servers[1],err,sizeof(err))==0);
+    next->servers[1].quiet=1; next->servers[1].notify_mentions=1; next->servers[1].sound=0;
     QA(prefs_save(next)==0 && prefs_load(loaded)==0);
+    QA(loaded->servers[1].quiet && loaded->servers[1].notify_mentions && !loaded->servers[1].sound);
     QA(loaded->servers[0].autoconnect && !loaded->servers[1].autoconnect && !strcmp(loaded->servers[1].token,"second-token"));
     loaded->servers[1].remember=0; QA(prefs_save(loaded)==0 && prefs_load(loaded)==0 && !loaded->servers[1].token[0]);
     G.prefs=*next; servers_init(); G.connected=1; G.prefs.show_avatars=0; strcpy(G.username,"you");

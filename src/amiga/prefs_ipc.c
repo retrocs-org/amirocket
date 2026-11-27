@@ -6,8 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 #define CONFIG_MAGIC 0x41524331UL
-#define CONFIG_PREFIX "AmiRocket.Config.v4."
-struct PrefsEndpoint { struct MsgPort port; ULONG magic; char name[64]; Prefs live; char plugins[272]; };
+#define CONFIG_PREFIX "AmiRocket.Config.v13."
+struct PrefsEndpoint { struct MsgPort port; ULONG magic; char name[64]; Prefs live; char plugins[272]; char network[PREFS_SERVERS_MAX][256]; };
 static int matches(struct Node *node)
 {
     return node->ln_Name && !strncmp(node->ln_Name,CONFIG_PREFIX,sizeof(CONFIG_PREFIX)-1) &&
@@ -92,4 +92,25 @@ int prefs_runtime_send_server(int slot,const ServerPrefs *server,int permanent)
 {
     if(slot<0 || slot>=PREFS_SERVERS_MAX || !server) return 0;
     return prefs_runtime_send_internal(NULL,slot,server,permanent);
+}
+
+void prefs_service_network(PrefsEndpoint *s,int slot,const char *text)
+{
+    if(s && slot>=0 && slot<PREFS_SERVERS_MAX) { Forbid(); snprintf(s->network[slot],256,"%s",text); Permit(); }
+}
+int prefs_runtime_network(char *out,int size)
+{
+    struct Node *n; int found=0,i,used=0;
+    if(size<1) return 0;
+    out[0]=0;
+    Forbid();
+    for(n=SysBase->PortList.lh_Head;n->ln_Succ;n=n->ln_Succ) if(matches(n)) {
+        PrefsEndpoint *s=(PrefsEndpoint *)n; found=1;
+        for(i=0;i<PREFS_SERVERS_MAX && used<size-1;i++) if(s->live.servers[i].url[0] && s->network[i][0]) {
+            int written=snprintf(out+used,size-used,"%s\n",s->network[i]);
+            if(written<0 || written>=size-used) { used=size-1; break; } used+=written;
+        }
+        break;
+    }
+    Permit(); return found;
 }

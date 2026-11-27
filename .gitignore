@@ -10,3 +10,6 @@ work/
 dist/
 BUILD-PROVENANCE.json
 *.dSYM/
+
+AmiRocket.drafts*
+*.[dD][rR][aA][fF][tT][sS]*

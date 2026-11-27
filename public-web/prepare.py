@@ -31,7 +31,7 @@ class Links(HTMLParser):
 def build():
     out = HERE / 'dist'
     out.mkdir(exist_ok=True)
-    for name in ('styles.css', 'app.js'):
+    for name in ('styles.css', 'app.js', 'changelog.md'):
         shutil.copy2(HERE / name, out / name)
     shutil.copytree(HERE / 'assets', out / 'assets', dirs_exist_ok=True)
     shutil.copy2(HERE / 'index.php', out / 'index.php')

@@ -14,6 +14,15 @@ static void qa_unread_attachments(void)
     QA(seen==1);
     G.rooms.items[0].unread=2; G.rooms.items[0].last_seen_ms=0; unread_capture("r1"); unread_resolve();
     QA(!strcmp(G.unread_anchor,G.msgs.items[G.msgs.count-2].id));
+    { int seek=G.unread_seek,exhausted=G.history_exhausted,count=G.msgs.count;ar_ms read=G.read_boundary;int unread=G.boundary_unread;
+      G.history_exhausted=0;G.read_boundary=G.msgs.items[0].ts_ms-1;G.boundary_unread=500;
+      G.unread_seek=0;QA(!unread_needs_history()); /* Opening a room never scans history. */
+      G.unread_seek=1;QA(unread_needs_history());
+      G.history_exhausted=1;QA(!unread_needs_history());G.history_exhausted=0;
+      G.msgs.count=MAX_MESSAGES;QA(!unread_needs_history());G.msgs.count=count;
+      G.read_boundary=0;QA(unread_needs_history()); /* Older servers without ls. */
+      G.unread_seek=seek;G.history_exhausted=exhausted;G.read_boundary=read;G.boundary_unread=unread;
+    }
     G.rooms.items[0].unread=G.rooms.items[0].alert=0; G.rooms.items[1].unread=0; G.rooms.items[1].alert=0; G.rooms.items[1].mentions=2;
     rooms_rebuild();
     for(i=0,seen=0;i<G.side.n;i++) if(G.side.r[i].rid && !strcmp(G.side.r[i].rid,"r2")) { QA(G.side.r[i].bold && G.side.r[i].mentions==2); seen=1; }
@@ -26,6 +35,9 @@ static void qa_unread_attachments(void)
     view_file_size(size,sizeof(size),1536); QA(!strcmp(size,"1.5 KiB"));
     { RcAttachment file={0}; file.size=3LL*1024*1024; QA(view_attachment_limit(&file,1) && !view_attachment_limit(&file,0));
       file.size=9LL*1024*1024; QA(view_attachment_limit(&file,0)!=NULL);
+      file.image=1; file.url="/original"; file.preview_url="/thumbnail"; QA(view_attachment_limit(&file,1)==NULL);
+      file.preview_url="/original"; QA(view_attachment_limit(&file,1)!=NULL);
+
     }
     { RcAttachment *file=NULL; long long old_size=0;
       for(i=0;i<G.msgs.count;i++) if(G.msgs.items[i].file_count) { file=&G.msgs.items[i].files[0]; break; }
@@ -38,7 +50,7 @@ static void qa_unread_attachments(void)
         buf_puts(&image->avatar,"not an image"); G.transfer_dialog=1; G.transfer_serial=999; G.download_pending=1; G.transfer_save_offer=0;
         G.prefs.inline_images=1; on_image(image);
         QA(!G.images[0].loading && !G.download_pending && G.transfer_save_offer && G.transfer_rc!=RC_OK && !G.images[0].expanded);
-        QA(strstr(G.transfer_status,"Save attachment")!=NULL);
+        QA(strstr(G.transfer_status,"Open / Save")!=NULL);
         G.transfer_dialog=0; G.transfer_save_offer=0; G.transfer_serial=0; netmsg_free(image); images_reset();
     } }
     memcpy(G.rooms.items,saved,sizeof(saved)); G.connected=connected;

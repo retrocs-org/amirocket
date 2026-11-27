@@ -89,7 +89,7 @@ Commands are case-insensitive; keys, room names and plugin ids retain their case
 | `SHOW`, `HIDE` | Bring the client forward or move its window/screen behind others. |
 | `PREFERENCES`, `QUIT` | Launch the separate editor or close the client. |
 
-Editable core keys: `interval`, `theme`, `ownscreen`, `chat_font`, `chat_font_size`, `preview_images`, `show_emoji`, `show_avatars`, `inline_images`, `open_links`, `browser`, `image_viewer`. Plugin keys begin with `plugin.`. Numeric and Boolean ranges are validated. Theme values use ids such as `workbench`, `mocha` or `nord`.
+Editable core keys: `realtime` (0/1; apply WebSocket subscriptions or polling fallback immediately), `low_memory` (0/1), `message_limit` (50–1000), `image_cache_kib` (256–8192), `request_spacing_ms` (100–5000), `background_interval` (15–600), `avatar_disk_cache` (0/1), `interval`, `theme`, `ownscreen`, `chat_font`, `chat_font_size`, `preview_images`, `show_emoji`, `show_avatars`, `inline_images`, `open_links`, `browser`, `image_viewer`. Plugin keys begin with `plugin.`. Numeric and Boolean ranges are validated. Theme values use ids such as `workbench`, `mocha` or `nord`.
 
 ## Notifications for NovaDock and other apps
 
@@ -99,7 +99,7 @@ Create a public message port, then send `SUBSCRIBE yourport` to AMIROCKET. Event
 AMIROCKET_EVENT KIND "room-id" "username" "text"
 ```
 
-Quotes inside fields are doubled and line breaks/control characters become spaces. Events include CONNECTED, DISCONNECTED, ROOM, ROOMCREATED, MESSAGE, SENT, UNREAD and CONFIG. MESSAGE covers newly received messages in the active room; this REST client does not receive all workspace messages. UNREAD text is the current total unread count from subscriptions; CONFIG text is `session` or `saved`. Payloads are bounded and long text can be truncated. Notifications describe data, never instructions to execute.
+Quotes inside fields are doubled and line breaks/control characters become spaces. Events include CONNECTED, DISCONNECTED, ROOM, ROOMCREATED, MESSAGE, SENT, UNREAD and CONFIG. MESSAGE covers newly received messages in the active room; the client subscribes to the active room and does not receive all workspace messages. UNREAD text is the current total unread count from subscriptions; CONFIG text is `session` or `saved`. Payloads are bounded and long text can be truncated. Notifications describe data, never instructions to execute.
 
 A receiver must reply promptly with `rm_Result1=0`, `rm_Result2=0`, and `ReplyMsg`; the sender owns/frees the packet and argstrings. Do not free incoming notifications. Native packets may have no interpreter task block, so do not reject them solely because `IsRexxMsg()` returns false: validate their standard structure length and command action as well. See the complete [native notification receiver](examples/rexx_monitor.c). Run the compiled AmiRocketMonitor from Shell with `Stack 65536`; Ctrl-C exits. Configure NovaDock to run scripts in [rexx](rexx/), or adapt the receiver to update a badge/widget.
 
@@ -216,3 +216,12 @@ merely because a send was rejected.
 
 The SDK archive includes AmiRocket's LICENSE (GPL-3.0-or-later) and COPYRIGHT.
 Beam68-derived release tooling retains its separate MIT notice in the main source distribution.
+
+Server snapshots may report `state=cooldown` while requests are paused, and
+`state=reconnecting` during recovery. These indicate temporary recovery; connected counters count healthy connections. Draft recovery data
+lives in `AmiRocket.drafts`, outside configuration and plugin settings.
+
+`STATUS` and `DOCKSTATUS` include `transfer=1` during a file transfer. Read-only
+queries and subscriptions remain responsive; UI-mutating commands return 10
+until completion. `SHOW` raises the transfer window and `QUIT` cancels/ends the
+session through the normal shutdown path.

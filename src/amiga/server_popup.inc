@@ -9,11 +9,18 @@ static int sidebar_server_at(int x,int y)
 }
 static void sidebar_pointer(struct IntuiMessage *im)
 {
-    int slot;
+    int slot,chat=0; struct IBox box;
     if(!G.win || (im->Class!=IDCMP_MOUSEMOVE && im->Class!=IDCMP_MOUSEBUTTONS)) return;
     slot=sidebar_server_at(im->MouseX,im->MouseY);
+    chat=!G.server_view && over(G.g[G_MSGS],im->MouseX,im->MouseY);
+    if(chat && im->Class==IDCMP_MOUSEBUTTONS && im->Code==MENUDOWN && area_box(G.g[G_MSGS],&box)) {
+        int row=G.chat.line_h>0?G.chat.top+(im->MouseY-box.Top)/G.chat.line_h:-1;
+        if(row>=0 && row<G.chat.n) { int index=G.chat.v[row].msg_index;
+            if(index>=0 && index<G.msgs.count) { ar_strlcpy(G.copy_id,G.msgs.items[index].id,sizeof(G.copy_id)); ar_strlcpy(G.copy_rid,G.cur_rid,sizeof(G.copy_rid)); G.copy_chat=1; G.action_menu_pending=1; }
+        }
+    }
     Forbid();
-    if(slot>=0) G.win->Flags|=WFLG_RMBTRAP; else G.win->Flags&=~WFLG_RMBTRAP;
+    if(slot>=0 || chat) G.win->Flags|=WFLG_RMBTRAP; else G.win->Flags&=~WFLG_RMBTRAP;
     Permit();
     if(slot>=0 && im->Class==IDCMP_MOUSEBUTTONS && im->Code==MENUDOWN) {
         G.side_menu_slot=slot; G.side_menu_pending=1;

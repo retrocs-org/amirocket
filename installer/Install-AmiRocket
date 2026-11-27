@@ -1,7 +1,9 @@
-.key DEST/A
+.key DEST/A,PREFS,CONFIG,DATA
+.def PREFS "SYS:Prefs"
+.def DATA "SYS:AmiRocket"
 .bra {
 .ket }
-; Install into the full destination drawer; settings are never copied.
+; Application files go into DEST; the Preferences executable goes into PREFS.
 FailAt 10
 "CreateIcons" CHECK
 If WARN
@@ -12,54 +14,75 @@ FailAt 5
 If NOT EXISTS "{DEST}"
  MakeDir "{DEST}"
 EndIf
-If NOT EXISTS "{DEST}/Plugins"
- MakeDir "{DEST}/Plugins"
+If NOT EXISTS "{PREFS}"
+ MakeDir "{PREFS}"
 EndIf
-If NOT EXISTS "{DEST}/Rexx"
- MakeDir "{DEST}/Rexx"
+If NOT EXISTS "{DATA}"
+ MakeDir "{DATA}"
 EndIf
-If NOT EXISTS "{DEST}/licenses"
- MakeDir "{DEST}/licenses"
+"CreateIcons" "{DATA}" DATA-CHECK "{DEST}" "{PREFS}"
+If NOT EXISTS "{DATA}/Plugins"
+ MakeDir "{DATA}/Plugins"
 EndIf
-If NOT EXISTS "{DEST}/scripts"
- MakeDir "{DEST}/scripts"
+If NOT EXISTS "{DATA}/Rexx"
+ MakeDir "{DATA}/Rexx"
+EndIf
+If NOT EXISTS "{DATA}/Sounds"
+ MakeDir "{DATA}/Sounds"
+EndIf
+If NOT EXISTS "{DATA}/licenses"
+ MakeDir "{DATA}/licenses"
+EndIf
+If NOT EXISTS "{PREFS}/AmiRocketPrefs.info"
+ If EXISTS "{DEST}/AmiRocketPrefs.info"
+  Copy "{DEST}/AmiRocketPrefs.info" TO "{PREFS}/AmiRocketPrefs.info" CLONE
+ EndIf
 EndIf
 Copy "AmiRocket" TO "{DEST}/AmiRocket" CLONE
-Copy "AmiRocket.guide" TO "{DEST}/AmiRocket.guide" CLONE
-If NOT EXISTS "{DEST}/AmiRocket.guide.info"
- Copy "AmiRocket.guide.info" TO "{DEST}/AmiRocket.guide.info" CLONE
+Copy "AmiRocket.guide" TO "HELP:AmiRocket.guide" CLONE
+If NOT EXISTS "HELP:AmiRocket.guide.info"
+ Copy "AmiRocket.guide.info" TO "HELP:AmiRocket.guide.info" CLONE
 EndIf
 If NOT EXISTS "{DEST}/AmiRocket.info"
  Copy "AmiRocket.info" TO "{DEST}/AmiRocket.info" CLONE
 EndIf
-Copy "AmiRocketMonitor" TO "{DEST}/AmiRocketMonitor" CLONE
-Copy "AmiRocketPrefs" TO "{DEST}/AmiRocketPrefs" CLONE
-If NOT EXISTS "{DEST}/AmiRocketPrefs.info"
- Copy "AmiRocketPrefs.info" TO "{DEST}/AmiRocketPrefs.info" CLONE
+Copy "AmiRocketMonitor" TO "{DATA}/AmiRocketMonitor" CLONE
+Copy "AmiRocketPrefs" TO "{PREFS}/AmiRocketPrefs" CLONE
+If NOT EXISTS "{PREFS}/AmiRocketPrefs.info"
+ Copy "AmiRocketPrefs.info" TO "{PREFS}/AmiRocketPrefs.info" CLONE
 EndIf
-Copy "BUILD-PROVENANCE.json" TO "{DEST}/BUILD-PROVENANCE.json" CLONE
-Copy "CHANGELOG.md" TO "{DEST}/CHANGELOG.md" CLONE
-Copy "COPYRIGHT" TO "{DEST}/COPYRIGHT" CLONE
-Copy "CreateIcons" TO "{DEST}/CreateIcons" CLONE
-Copy "Install" TO "{DEST}/Install" CLONE
-If NOT EXISTS "{DEST}/Install.info"
- Copy "Install.info" TO "{DEST}/Install.info" CLONE
+Copy "BUILD-PROVENANCE.json" TO "{DATA}/BUILD-PROVENANCE.json" CLONE
+Copy "CHANGELOG.md" TO "{DATA}/CHANGELOG.md" CLONE
+Copy "COPYRIGHT" TO "{DATA}/COPYRIGHT" CLONE
+Copy "CreateIcons" TO "{DATA}/CreateIcons" CLONE
+Copy "LICENSE" TO "{DATA}/LICENSE" CLONE
+Copy "Plugins/quickreply.arp" TO "{DATA}/Plugins/quickreply.arp" CLONE
+Copy "Plugins/quickreply.arp.meta" TO "{DATA}/Plugins/quickreply.arp.meta" CLONE
+Copy "Plugins/timestamp.arp" TO "{DATA}/Plugins/timestamp.arp" CLONE
+Copy "Plugins/timestamp.arp.meta" TO "{DATA}/Plugins/timestamp.arp.meta" CLONE
+Copy "README.md" TO "{DATA}/README.md" CLONE
+Copy "ReadMe" TO "{DATA}/ReadMe" CLONE
+Copy "Rexx/connection.rexx" TO "{DATA}/Rexx/connection.rexx" CLONE
+Copy "Rexx/dock-status.rexx" TO "{DATA}/Rexx/dock-status.rexx" CLONE
+Copy "Rexx/low-memory.rexx" TO "{DATA}/Rexx/low-memory.rexx" CLONE
+Copy "Rexx/novadock-toggle.rexx" TO "{DATA}/Rexx/novadock-toggle.rexx" CLONE
+Copy "Rexx/quick-reply.rexx" TO "{DATA}/Rexx/quick-reply.rexx" CLONE
+Copy "Rexx/status.rexx" TO "{DATA}/Rexx/status.rexx" CLONE
+Copy "Sounds/Notification.8svx" TO "{DATA}/Sounds/Notification.8svx" CLONE
+Copy "VERSION" TO "{DATA}/VERSION" CLONE
+Copy "licenses/Beam68-release-tools.txt" TO "{DATA}/licenses/Beam68-release-tools.txt" CLONE
+"CreateIcons" "{CONFIG}" CONFIG
+"CreateIcons" "{DEST}" ICONS "{PREFS}"
+"CreateIcons" "{DATA}" DATA "{DEST}" "{PREFS}"
+"CreateIcons" "{DEST}" RECORD "{PREFS}"
+If EXISTS "{DEST}/Install"
+ Delete "{DEST}/Install"
 EndIf
-Copy "LICENSE" TO "{DEST}/LICENSE" CLONE
-Copy "Plugins/quickreply.arp" TO "{DEST}/Plugins/quickreply.arp" CLONE
-Copy "Plugins/quickreply.arp.meta" TO "{DEST}/Plugins/quickreply.arp.meta" CLONE
-Copy "Plugins/timestamp.arp" TO "{DEST}/Plugins/timestamp.arp" CLONE
-Copy "Plugins/timestamp.arp.meta" TO "{DEST}/Plugins/timestamp.arp.meta" CLONE
-Copy "README.md" TO "{DEST}/README.md" CLONE
-Copy "ReadMe" TO "{DEST}/ReadMe" CLONE
-Copy "Rexx/connection.rexx" TO "{DEST}/Rexx/connection.rexx" CLONE
-Copy "Rexx/dock-status.rexx" TO "{DEST}/Rexx/dock-status.rexx" CLONE
-Copy "Rexx/low-memory.rexx" TO "{DEST}/Rexx/low-memory.rexx" CLONE
-Copy "Rexx/novadock-toggle.rexx" TO "{DEST}/Rexx/novadock-toggle.rexx" CLONE
-Copy "Rexx/quick-reply.rexx" TO "{DEST}/Rexx/quick-reply.rexx" CLONE
-Copy "Rexx/status.rexx" TO "{DEST}/Rexx/status.rexx" CLONE
-Copy "VERSION" TO "{DEST}/VERSION" CLONE
-Copy "licenses/Beam68-release-tools.txt" TO "{DEST}/licenses/Beam68-release-tools.txt" CLONE
-Copy "scripts/Install-AmiRocket" TO "{DEST}/scripts/Install-AmiRocket" CLONE
-"CreateIcons" "{DEST}" ICONS
+If EXISTS "{DEST}/Install.info"
+ Delete "{DEST}/Install.info"
+EndIf
+If EXISTS "{DEST}/scripts/Install-AmiRocket"
+ Delete "{DEST}/scripts/Install-AmiRocket"
+EndIf
+"CreateIcons" "{DEST}" CLEAN-LEGACY "{PREFS}"
 Echo "AmiRocket installed. Settings preserved."

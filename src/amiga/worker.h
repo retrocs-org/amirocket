@@ -28,18 +28,22 @@ enum {
     NC_HISTORY,         /* a_rid, a_before: older page; does not alter sync cursor */
     NC_DOWNLOAD,        /* a_url, a_text: attachment URL and chosen local path */
     NC_SEND,            /* a_rid, a_text (UTF-8) */
+    NC_SEARCH,          /* a_rid, a_text query, a_interval offset; rooms count in a_background */
+    NC_UPLOAD,          /* a_url room, a_text local file; explicit upload + confirm */
     NC_POLL_NOW,
     NC_SET_FOCUS,       /* a_interval: selected server (1), background (0) */
     NC_SET_INTERVAL,    /* a_interval seconds */
     NC_LOGOUT,          /* revoke the token on the server */
     NC_DISCONNECT,      /* just drop the session */
     NC_QUIT,
+    NC_THREAD, NC_EDIT, NC_DELETE, NC_REACT, NC_THREAD_SEND,
 
     /* events (worker -> GUI) */
     NE_UPDATE = 100,    /* rooms: delta, msgs: delta for rid */
     NE_PRESENCE,
     NE_RECONNECTED,     /* successful automatic login, same payload as NC_CONNECT */
     NE_TRANSFER,        /* a_before: bytes received, a_interval: total bytes */
+    NE_NETWORK,         /* text: credential-free per-server traffic snapshot */
     NE_STATUS           /* text: connection state change, rc: last error */
 };
 
@@ -54,7 +58,9 @@ typedef struct NetMsg {
     /* command arguments (owned by the message, ar_malloc'd) */
     char *a_url, *a_user, *a_pass, *a_code, *a_uid, *a_token, *a_rid, *a_text;
     ar_ms a_before;
+    int   a_realtime;           /* NC_SET_INTERVAL: enable event subscriptions */
     int   a_verify;
+    int   a_background;
     int   a_interval;
 
     /* results */

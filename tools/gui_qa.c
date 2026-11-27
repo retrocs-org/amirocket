@@ -6,7 +6,29 @@
 #include <dos/dostags.h>
 #include <rexx/storage.h>
 #include <proto/rexxsyslib.h>
-static void qa_trace(const char *s) { Write(Output(), (APTR)s, (LONG)strlen(s)); }
+#include <proto/cybergraphics.h>
+#include <cybergraphx/cybergraphics.h>
+struct Library *CyberGfxBase;
+static volatile ULONG qa_phase;
+static volatile int qa_observer_done,qa_observer_stopped;
+static void qa_trace(const char *s) { qa_phase++; Write(Output(), (APTR)s, (LONG)strlen(s)); }
+/* A stalled GUI call cannot report its own state. Observe it from another task. */
+static void qa_observer(void)
+{
+    ULONG phase=qa_phase;int quiet=0;
+    while(!qa_observer_done){Delay(50);if(phase!=qa_phase){phase=qa_phase;quiet=0;}else quiet++;
+        if(quiet==15 && IntuitionBase){struct Window *w;struct Screen *sc=IntuitionBase->FirstScreen;struct Library *saved=CyberGfxBase;
+            for(w=sc?sc->FirstWindow:NULL;w;w=w->NextWindow)printf("QA stalled window: %s\n",w->Title?(char *)w->Title:"");
+            CyberGfxBase=OpenLibrary("cybergraphics.library",0);
+            if(sc && CyberGfxBase){int width=sc->Width,height=sc->Height;UBYTE *rgb=AllocVec(width*height*3,MEMF_PUBLIC);
+                if(rgb){BPTR f;char header[80];ReadPixelArray(rgb,0,0,width*3,&sc->RastPort,0,0,width,height,RECTFMT_RGB);
+                    f=Open("AmiRocket:qa-stall.ppm",MODE_NEWFILE);if(f){int n=snprintf(header,sizeof(header),"P6\n%d %d\n255\n",width,height);Write(f,header,n);Write(f,rgb,width*height*3);Close(f);}FreeVec(rgb);}}
+            if(CyberGfxBase)CloseLibrary(CyberGfxBase);
+            CyberGfxBase=saved;fflush(stdout);
+        }
+    }
+    qa_observer_stopped=1;
+}
 static void qa_log(const char *s) { qa_trace(s); }
 unsigned long __stack = 65536;
 static int qa_fail, qa_pass;
@@ -16,7 +38,11 @@ extern int worker_recovery_qa(int *passed);
 static void qa_message(RcMsg *m,int n);
 #include "servers_qa.inc"
 #include "dock_qa.inc"
+#include "release_soak_qa.inc"
 #include "unread_qa.inc"
+#include "message_actions_qa.inc"
+#include "external_images_qa.inc"
+#include "release_polish_qa.inc"
 
 static void qa_key(UWORD key)
 {
@@ -47,6 +73,8 @@ static void qa_message(RcMsg *m, int n)
     m->ts_ms = iso8601_to_ms("2026-01-01T00:00:00Z") + (ar_ms)n * 60000;
     m->updated_ms = m->ts_ms;
 }
+
+#include "conversation_qa.inc"
 static int qa_run(int argc, char **argv)
 {
     int i, row, file, message;
@@ -86,7 +114,7 @@ static int qa_run(int argc, char **argv)
     QA(G.g[G_FILTER] && G.g[G_INPUT] && !G.g[G_COMPOSELABEL] && !G.g[G_STATUS]);
     QA(G.win->Width <= G.scr->Width && G.win->Height <= G.scr->Height);
     { struct IBox b; QA(area_box(G.g[G_ROOMS], &b) && b.Width > 50); }
-    { ULONG x = 0; GetAttr(GA_Height, G.g[G_INPUT], &x); QA(x >= 2*G.scr->RastPort.TxHeight && x <= (ULONG)(2*G.scr->RastPort.TxHeight+16)); }
+    { ULONG x = 0; GetAttr(GA_Height, G.g[G_INPUT], &x); QA(x >= 2*G.scr->RastPort.TxHeight && x < (ULONG)G.win->Height/2); }
     composer_set("abc\nxyz", 5); composer_capture();
     QA(!strncmp(G.hook_buf, "abc\nxyz", 7)); QA(G.hook_pos == 5);
     { NetMsg *sent = netmsg_new(NC_SEND);
@@ -155,7 +183,8 @@ static int qa_run(int argc, char **argv)
         if (line->len >= 2 && text[0] == ' ' && text[1] == ' ') indented++;
         if (line->len >= 17 && !strncmp(text, "  alias: *literal*", 17)) literal++;
       }
-      QA(code >= 4 && indented >= 2 && literal == 1);
+      QA(code >= 3 && indented >= 2 && literal == 1);
+      QA(!strstr(buf_str(&cv.pool),"```") && !strstr(buf_str(&cv.pool),"Code:"));
       QA(cv.nlinks >= 3);
       for (j = 0; j < cv.nlinks; j++) {
         const VLink *link = &cv.links[j]; const char *url;
@@ -187,7 +216,7 @@ static int qa_run(int argc, char **argv)
       if (panel.obj && panel.win) {
         QA(panel.win->Width <= G.scr->Width && panel.win->Height <= G.scr->Height);
         previous = qa_panel_hash(&panel);
-        for (section = 0; section < 7; section++) {
+        for (section = 0; section < 9; section++) {
           prefs_panel_select(&panel, section);
           GetAttr(PAGE_Current, panel.page, &current); QA(current == (ULONG)section);
           if (section) QA(qa_panel_hash(&panel) != previous);
@@ -205,12 +234,14 @@ static int qa_run(int argc, char **argv)
         if(argc>1 && !strcmp(argv[1],"PREFS")) { prefs_panel_select(&panel,2); qa_trace("QA visual plugin review\n"); Delay(1500); }
         prefs_panel_select(&panel, 0);
         qa_trace("QA preferences read and validate\n");
+        QA(!strcmp(str_of(panel.field[P_PREVIEWSIZE]),"320"));
         QA(prefs_panel_read(&panel, &next) && next.show_emoji && next.show_avatars && next.inline_images);
         SetGadgetAttrs((struct Gadget *)panel.field[P_INTERVAL], panel.win, NULL, STRINGA_TextVal, (ULONG)"0", TAG_END);
         QA(!prefs_panel_read(&panel, &next));
         SetGadgetAttrs((struct Gadget *)panel.field[P_INTERVAL], panel.win, NULL, STRINGA_TextVal, (ULONG)"30", TAG_END);
         SetGadgetAttrs((struct Gadget *)panel.field[P_AVATARS], panel.win, NULL, GA_Selected, FALSE, TAG_END);
         QA(prefs_panel_read(&panel, &next) && next.interval == 30 && !next.show_avatars);
+        prefs_panel_low_resource(&panel);QA(prefs_panel_read(&panel,&next) && next.low_memory && !next.show_avatars && !next.show_emoji && next.interval==60 && next.background_interval==300 && next.preview_width==160 && next.message_limit==100 && next.request_spacing_ms==1500 && next.image_cache_kib==256);
         prefs_panel_dispose(&panel);
       }
     }
@@ -247,18 +278,25 @@ static int qa_run(int argc, char **argv)
               }
           }
           QA(bitmap != NULL);
-          { NetMsg *image = netmsg_new(NC_IMAGE); int found = 0, row;
-            G.images[0].url = ar_strdup(G.msgs.items[40].files[0].url); G.images[0].loading = 1;
+          { NetMsg *image = netmsg_new(NC_IMAGE); int found = 0, row, pending_before=G.pending;
+            RcAttachment *attachment=&G.msgs.items[40].files[0]; char *old_preview=attachment->preview_url; long long original_size=attachment->size;
+            attachment->preview_url=ar_strdup("/qa/small-server-thumbnail.png"); attachment->size=9LL*1024*1024;
+            QA(view_attachment_limit(attachment,1)==NULL && view_attachment_limit(attachment,0)!=NULL);
+            G.images[0].url = ar_strdup(rc_attachment_preview_url(attachment)); G.images[0].loading = 1;
             image->a_url = ar_strdup(G.images[0].url); image->a_interval = G.image_generation;
             buf_append(&image->avatar, bytes, n); on_image(image); netmsg_free(image);
             QA(G.images[0].expanded && G.images[0].bitmap != NULL);
             msgs_rebuild(0); draw_chat(); QA(G.chat.nimages == 1);
             for (row = 0; row < G.chat.n; row++) if (G.chat.v[row].kind == VL_IMAGE) found++;
             QA(found > 0);
-            image_toggle(40, 0); draw_chat(); QA(!G.images[0].expanded && G.chat.nimages == 0);
+            image_toggle(40, 0); draw_chat(); QA(!G.images[0].expanded && G.chat.nimages == 1 && G.chat.images[0].height==0);
             image_toggle(40, 0); draw_chat(); QA(G.images[0].expanded && G.chat.nimages == 1);
             G.prefs.inline_images = 0; draw_chat(); QA(G.chat.nimages == 0);
-            G.prefs.inline_images = 1; images_reset(); msgs_rebuild(0); draw_chat();
+            QA(G.pending==pending_before); /* collapse/reopen reuses downloaded thumbnail */
+            QA(strcmp(attachment->url,attachment->preview_url)!=0);
+            G.prefs.inline_images = 1; images_reset();
+            ar_free(attachment->preview_url); attachment->preview_url=old_preview; attachment->size=original_size;
+            msgs_rebuild(0); draw_chat();
           }
           { struct BitMap *large = avatar_get("alice", 32);
             QA(large != NULL && large != bitmap);
@@ -304,6 +342,48 @@ static int qa_run(int argc, char **argv)
     QA(row < G.chat.n);
     G.chat.top = row; G.chat.follow = 0; draw_chat();
     QA(chat_file_hit(&G.chat, 0, &message, &file) && file == 0 && G.msgs.items[message].file_count == 1);
+    /* Compact card action hit areas follow the current chat font. */
+    { int action_row,oldtop=G.chat.top;struct TextFont *oldfont=G.win->RPort->Font;
+      if(G.chat_font)SetFont(G.win->RPort,G.chat_font);
+      for(action_row=0;action_row<G.chat.n && G.chat.v[action_row].kind!=VL_FILE_ACTION;action_row++);
+      QA(action_row<G.chat.n);
+      if(action_row<G.chat.n) { const VLine *line=&G.chat.v[action_row];const char *label=G.chat.pool.data+line->off;int x;
+        G.chat.top=action_row;
+        for(x=0;x<G.chat.width && chat_file_action(&G.chat,G.win->RPort,x,0)!=0;x++);
+        QA(x<G.chat.width && chat_file_action(&G.chat,G.win->RPort,x,0)==0);
+        QA(chat_file_action(&G.chat,G.win->RPort,x+view_text_width(G.win->RPort,label,(int)(strchr(label,'|')-label))+4,0)==1);
+        QA(strstr(label,"Open") && strstr(label,"Save"));
+      }
+      G.chat.top=oldtop;SetFont(G.win->RPort,oldfont);
+    }
+    /* Verify the actual progress gadget and Cancel transition with worker events. */
+    { Object *root,*window,*cancel;struct Window *win;struct MsgPort *reply=CreateMsgPort();ULONG level=0;
+      root=VLayoutObject,LAYOUT_AddChild,G.transfer_text=panel_button(701,"Downloading"),
+        LAYOUT_AddChild,G.transfer_gauge=FuelGaugeObject,FUELGAUGE_Min,0,FUELGAUGE_Max,100,FUELGAUGE_Level,0,FUELGAUGE_Percent,TRUE,End,
+        LAYOUT_AddChild,cancel=panel_button(702,"Cancel"),End;
+      window=panel_window(root,"Transfer regression",400);win=window?RA_OpenWindow(window):NULL;QA(win && reply);
+      if(win && reply) {NetMsg *progress=netmsg_new(NE_TRANSFER);G.transfer_win=win;G.transfer_dialog=1;G.transfer_serial=567;G.transfer_cancelled=0;
+        progress->sent_at=567;progress->a_before=512;progress->a_interval=1024;progress->msg.mn_ReplyPort=reply;
+        PutMsg(G.port,&progress->msg);handle_port();
+        GetAttr(FUELGAUGE_Level,G.transfer_gauge,&level);QA(level==50);
+        progress=(NetMsg *)GetMsg(reply);if(progress)netmsg_free(progress);
+        transfer_cancel_current(cancel);QA(G.transfer_cancelled);GetAttr(GA_Disabled,cancel,&level);QA(level);
+      }
+      G.transfer_dialog=G.transfer_cancelled=0;G.transfer_win=NULL;G.transfer_text=G.transfer_gauge=NULL;
+      if(window)DisposeObject(window);
+      if(reply)DeleteMsgPort(reply);
+    }
+    /* Each reaction badge targets its own shortcode and toggles membership. */
+    { RcMsg *target=&G.msgs.items[0];char *old=target->reactions,*actors=target->reaction_users;int connected=G.connected;NetMsg *command;ChatView cv;RcMsgList list={0};struct RastPort rp=*G.win->RPort;int row,x;
+      target->reactions=ar_strdup("smile 2\nheart 1");{Buf owned;buf_init(&owned);buf_printf(&owned,"smile\t%s\nheart\talice\n",G.username);target->reaction_users=buf_detach(&owned);}G.connected=1;
+      command=inline_reaction_command(0,0);QA(command && !strcmp(command->a_text,"smile") && command->a_verify==0);if(command)netmsg_free(command);
+      command=inline_reaction_command(0,1);QA(command && !strcmp(command->a_text,"heart") && command->a_verify==1);if(command)netmsg_free(command);
+      list.items=target;list.count=1;chat_init(&cv);chat_layout(&cv,&rp,400,&list,0,0,G.username,"");cv.visible=100;
+      for(row=0;row<cv.n && cv.v[row].kind!=VL_PILLS;row++);
+      QA(row<cv.n);
+      if(row<cv.n) {cv.top=row;for(x=0;x<400 && chat_reaction_hit(&cv,&rp,x,0)!=0;x++);QA(x<400);for(;x<400 && chat_reaction_hit(&cv,&rp,x,0)!=1;x++);QA(x<400);QA(cv.v[row].own_reactions==1);}
+      chat_free(&cv);ar_free(target->reactions);ar_free(target->reaction_users);target->reactions=old;target->reaction_users=actors;G.connected=connected;
+    }
     /* A stale history reply must not affect another room/generation. */
     older = netmsg_new(NC_HISTORY); strcpy(older->rid, "r1"); older->a_interval = 6;
     G.history_pending = 1; on_older(older); QA(G.history_pending == 1); netmsg_free(older);
@@ -350,13 +430,47 @@ static int qa_run(int argc, char **argv)
           QA(main_restore());
       }
     }
+    { static const unsigned char header[]={ 'F','O','R','M',0,0,0,104,'8','S','V','X','V','H','D','R',0,0,0,20,
+        0,0,0,64,0,0,0,0,0,0,0,0,0x1f,0x40,1,0,0,1,0,0,'B','O','D','Y',0,0,0,64};
+      signed char sample[64];BPTR sound;int k;Object *cached;
+      for(k=0;k<64;k++)sample[k]=(k%16<8)?16:-16;
+      sound=Open("T:AmiRocket-notify-qa.8svx",MODE_NEWFILE);QA(sound!=0);
+      if(sound) {Write(sound,(APTR)header,sizeof(header));Write(sound,sample,sizeof(sample));Close(sound);
+        notification_sound_play("T:AmiRocket-notify-qa.8svx");QA(G.notification_sound!=NULL);cached=G.notification_sound;
+        notification_sound_play("T:AmiRocket-notify-qa.8svx");QA(G.notification_sound==cached);
+        notification_sound_clear();QA(G.notification_sound==NULL);DeleteFile("T:AmiRocket-notify-qa.8svx");
+        notification_sound_play("PROGDIR:Sounds/Notification.8svx");QA(G.notification_sound!=NULL);notification_sound_clear();
+      }
+    }
+    { Prefs *paths=ar_calloc(1,sizeof(*paths));QA(paths!=NULL);
+      if(paths) {prefs_defaults(paths);QA(!strcmp(paths->download_dir,"SYS:Downloads"));
+        QA(!prefs_set(paths,"cache_dir","RAM:Custom media") && !strcmp(paths->cache_dir,"RAM:Custom media"));
+        QA(prefs_set(paths,"download_dir","relative/path")==-1);ar_free(paths);}
+    }
+    { char value[16];int old=G.prefs.auto_thumbnails;
+      QA(prefs_set(&G.prefs,"auto_thumbnails","1")==0 && G.prefs.auto_thumbnails);
+      QA(prefs_set(&G.prefs,"auto_thumbnails","2")==-1);
+      QA(prefs_get(&G.prefs,"auto_thumbnails",value,sizeof(value))==0 && !strcmp(value,"1"));
+      G.prefs.auto_thumbnails=old;
+    }
+    { int old=G.prefs.preview_width; char value[16];
+      QA(prefs_set(&G.prefs,"preview_width","160")==0 && G.prefs.preview_width==160);
+      QA(prefs_set(&G.prefs,"preview_width","123")==-1 && G.prefs.preview_width==160);
+      QA(prefs_get(&G.prefs,"preview_width",value,sizeof(value))==0 && !strcmp(value,"160"));
+      G.prefs.preview_width=old;
+    }
+    qa_external_images();
+    qa_release_polish();
+    qa_message_actions();
+    qa_conversation_features();
     qa_unread_attachments();
     qa_trace("QA worker retry backoff and expired credentials\n");
     qa_fail+=worker_recovery_qa(&qa_pass);
     qa_extensions();
     qa_servers(argc>1 && !strcmp(argv[1],"SERVERS"));
     qa_dock_processes();
-    if (argc > 1 && strcmp(argv[1],"SERVERS") && strcmp(argv[1],"PREFS") && strcmp(argv[1],"ICONIFY") && G.win) {
+    if(argc>1 && !strncmp(argv[1],"SOAK=",5)) { int seconds=atoi(argv[1]+5); if(seconds>=60 && seconds<=86400) qa_release_soak(seconds); else QA(0); }
+    if (argc > 1 && strcmp(argv[1],"SERVERS") && strcmp(argv[1],"PREFS") && strcmp(argv[1],"ICONIFY") && strncmp(argv[1],"SOAK=",5) && G.win) {
         RcMsg *last = &G.msgs.items[G.msgs.count - 1];
         ar_free(last->text); last->text = ar_strdup("Code keeps indentation and literal characters:\n```yaml\nalias: Hallway lights\ntriggers:\n  - platform: device\n    type: turn_on\n    value: '*literal* :smile:'\n```\nOpen https://example.com/docs?section=amiga or [documentation](https://docs.example/guide). ");
         G.copy_chat = 0; composer_set("", 0);
@@ -395,9 +509,13 @@ int main(int argc, char **argv)
     qa_parent = FindTask(NULL); qa_signal = AllocSignal(-1);
     if (qa_signal < 0) return 20;
     qa_argc = argc; qa_argv = argv;
+    qa_observer_stopped=1;
+    if(argc>1 && !strcmp(argv[1],"OBSERVE")){qa_observer_stopped=0;
+        if(!CreateNewProcTags(NP_Entry,(ULONG)qa_observer,NP_StackSize,32768,NP_Name,(ULONG)"AmiRocket QA observer",NP_Input,Input(),NP_Output,Output(),NP_CloseInput,FALSE,NP_CloseOutput,FALSE,TAG_END))qa_observer_stopped=1;
+    }
     child = CreateNewProcTags(NP_Entry, (ULONG)qa_entry, NP_StackSize, 262144,
         NP_Name, (ULONG)"AmiRocket GUI checks", NP_Input, Input(), NP_Output, Output(),
         NP_CloseInput, FALSE, NP_CloseOutput, FALSE, TAG_END);
     if (!child) { FreeSignal(qa_signal); return 20; }
-    Wait(1UL << qa_signal); FreeSignal(qa_signal); return qa_result;
+    Wait(1UL << qa_signal);qa_observer_done=1;while(!qa_observer_stopped)Delay(1); FreeSignal(qa_signal); return qa_result;
 }

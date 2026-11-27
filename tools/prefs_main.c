@@ -26,7 +26,7 @@ static LONG prefs_run(void)
             if (!result) {
                 if(prefs_check==4) { prefs_panel_select(&panel,6); Delay(2500); }
                 else if(prefs_check==3) { prefs_panel_select(&panel,2); Delay(2000); }
-                else for (i = 0; i < 7; i++) { prefs_panel_select(&panel, i); if (prefs_check == 2) Delay(350); }
+                else for (i = 0; i < 10; i++) { prefs_panel_select(&panel, i); if (prefs_check == 2) Delay(350); }
                 prefs_panel_dispose(&panel);
             }
         } else { preferences_window(); result = RETURN_OK; }

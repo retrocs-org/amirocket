@@ -1,7 +1,7 @@
 /*
  * AmiRocket - session: login state, room list and the polling strategy.
  *
- * Polling (REST only, no WebSocket yet):
+ * REST delta synchronization (periodic or triggered by realtime events):
  *   rooms:       subscriptions.get?updatedSince=<newest subscription change>
  *   open room:   chat.syncMessages?lastUpdate=<newest message change>
  * Timestamps always come from the server (message _updatedAt or the HTTP

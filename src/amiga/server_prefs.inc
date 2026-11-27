@@ -21,12 +21,12 @@ static void prefs_servers_rows(PrefsPanel *p)
 static void prefs_server_edit(PrefsPanel *p,int add)
 {
     int slot=p->server_selected,done=0,i; ServerPrefs draft; char error[160];
-    Object *root,*obj,*name,*url,*user,*auto_connect,*verify,*remember,*footer; struct Window *win; char caption[100];
+    Object *root,*obj,*name,*url,*user,*auto_connect,*verify,*remember,*quiet,*sound,*mentions,*footer; struct Window *win; char caption[100];
     if(add) { for(slot=0;slot<PREFS_SERVERS_MAX && p->plugin_draft->servers[slot].url[0];slot++); }
     if(slot<0) return;
     if(slot==PREFS_SERVERS_MAX) { request("Servers","Up to eight servers can be configured."); return; }
     draft=p->plugin_draft->servers[slot];
-    if(add) { memset(&draft,0,sizeof(draft)); draft.verify=draft.remember=1; strcpy(draft.url,"https://"); }
+    if(add) { memset(&draft,0,sizeof(draft)); draft.verify=draft.remember=draft.sound=1; strcpy(draft.url,"https://"); }
     if(p->direct_edit) footer=HLayoutObject,
         LAYOUT_AddChild,panel_button(303,"Use"), LAYOUT_AddChild,panel_button(301,"Save"), LAYOUT_AddChild,panel_button(297,"Cancel"), End;
     else footer=HLayoutObject,
@@ -38,6 +38,9 @@ static void prefs_server_edit(PrefsPanel *p,int add)
         LAYOUT_AddChild,auto_connect=panel_check(293,"Auto-connect on startup",draft.autoconnect), CHILD_WeightedHeight,0,
         LAYOUT_AddChild,verify=panel_check(294,"Verify TLS certificate",draft.verify), CHILD_WeightedHeight,0,
         LAYOUT_AddChild,remember=panel_check(295,"Remember login for this server",draft.remember), CHILD_WeightedHeight,0,
+        LAYOUT_AddChild,mentions=panel_check(298,"Notify only for mentions",draft.notify_mentions), CHILD_WeightedHeight,0,
+        LAYOUT_AddChild,sound=panel_check(299,"Play notification sound",draft.sound), CHILD_WeightedHeight,0,
+        LAYOUT_AddChild,quiet=panel_check(300,"Quiet mode (keep unread badges)",draft.quiet), CHILD_WeightedHeight,0,
         LAYOUT_AddChild,panel_text("Sign in from the client to remember a login.\nPasswords are never stored in Preferences."), CHILD_WeightedHeight,0,
         LAYOUT_AddChild,footer, CHILD_WeightedHeight,0,
     End;
@@ -62,6 +65,7 @@ static void prefs_server_edit(PrefsPanel *p,int add)
                 ar_strlcpy(draft.name,str_of(name),sizeof(draft.name)); ar_trim(draft.name);
                 ar_strlcpy(draft.url,str_of(url),sizeof(draft.url)); ar_trim(draft.url);
                 ar_strlcpy(draft.user,str_of(user),sizeof(draft.user)); ar_trim(draft.user);
+                draft.quiet=checked(quiet); draft.sound=checked(sound); draft.notify_mentions=checked(mentions);
                 draft.autoconnect=checked(auto_connect); draft.verify=checked(verify); draft.remember=checked(remember);
                 if(prefs_server_validate(&draft,error,sizeof(error))<0) { request("Server",error); continue; }
                 for(i=0;i<PREFS_SERVERS_MAX;i++) if(i!=slot && !strcmp(p->plugin_draft->servers[i].url,draft.url) && !strcmp(p->plugin_draft->servers[i].user,draft.user)) break;
@@ -75,7 +79,7 @@ static void prefs_server_edit(PrefsPanel *p,int add)
             }
         }
         if(!done) {
-            int changed=strcmp(str_of(name),draft.name)||strcmp(str_of(url),draft.url)||strcmp(str_of(user),draft.user)||checked(auto_connect)!=draft.autoconnect||checked(verify)!=draft.verify||checked(remember)!=draft.remember;
+            int changed=strcmp(str_of(name),draft.name)||strcmp(str_of(url),draft.url)||strcmp(str_of(user),draft.user)||checked(auto_connect)!=draft.autoconnect||checked(verify)!=draft.verify||checked(remember)!=draft.remember||checked(quiet)!=draft.quiet||checked(sound)!=draft.sound||checked(mentions)!=draft.notify_mentions;
             snprintf(caption,sizeof(caption),"%s%s",add?"Add Rocket.Chat server":"Edit Rocket.Chat server",changed?" * Unsaved changes":""); SetWindowTitles(win,(CONST_STRPTR)caption,(CONST_STRPTR)-1);
             Delay(5); handle_port();
         }

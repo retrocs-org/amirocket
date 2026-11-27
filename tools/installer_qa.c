@@ -2,6 +2,7 @@
 #include <exec/types.h>
 #include <exec/execbase.h>
 #include <dos/dos.h>
+#include <dos/var.h>
 #include <intuition/intuitionbase.h>
 #include <proto/intuition.h>
 #include <devices/input.h>
@@ -39,7 +40,7 @@ static int run_installer(const char *script)
     struct MsgPort *port=CreateMsgPort();struct IOStdReq *io=port?(struct IOStdReq *)CreateIORequest(port,sizeof(struct IOStdReq)):NULL;
     int opened=io&&OpenDevice("input.device",0,(struct IORequest *)io,0)==0;
     DeleteFile("T:ARInstallDone");DeleteFile("T:ARInstallFailed");
-    snprintf(text,sizeof(text),"Stack 131072\nCD AmiRocket:\nSYS:System/Installer QATools:%s APPNAME AmiRocket MINUSER NOVICE DEFUSER NOVICE LOGFILE QATools:installer.log >QATools:installer-cli.log\nIf WARN\n Echo >T:ARInstallFailed failed\nEndIf\nEcho >T:ARInstallDone done\n",script);
+    snprintf(text,sizeof(text),"Stack 131072\nCD ReleaseFiles:\nSYS:System/Installer QATools:%s APPNAME AmiRocket MINUSER NOVICE DEFUSER NOVICE LOGFILE QATools:installer.log >QATools:installer-cli.log\nIf WARN\n Echo >T:ARInstallFailed failed\nEndIf\nEcho >T:ARInstallDone done\n",script);
     if(!write_text("T:ARInstallRun",text))return 0;
     in=Open("NIL:",MODE_OLDFILE);out=Open("NIL:",MODE_NEWFILE);
     if(!in||!out)return 0;
@@ -54,10 +55,20 @@ static int run_installer(const char *script)
             f=Open("QATools:screen.ppm",MODE_NEWFILE);if(f){int n=sprintf(header,"P6\n%d %d\n255\n",w,h);Write(f,header,n);Write(f,rgb,w*h*3);Close(f);}free(rgb);}
           }if(CyberGfxBase)CloseLibrary(CyberGfxBase);}
 
-        if(opened&&(i==2||i==12||i==24)&&IntuitionBase){struct Window *w;
-          for(w=IntuitionBase->FirstScreen->FirstWindow;w;w=w->NextWindow)if(w->Title&&strstr((char *)w->Title,"QATools:"))break;
-          if(w){struct InputEvent e;struct IEPointerPixel pos;memset(&e,0,sizeof(e));
-            pos.iepp_Screen=w->WScreen;pos.iepp_Position.X=w->LeftEdge+(i==2?100:w->Width/2);pos.iepp_Position.Y=w->TopEdge+w->Height-(i==2?22:8);
+        if(opened&&(i==2 || (i>=12 && i%12==0))&&IntuitionBase){struct Window *w;
+          for(w=IntuitionBase->FirstScreen->FirstWindow;w;w=w->NextWindow)if(w->Title&&(strstr((char *)w->Title,"QATools:") || strstr((char *)w->Title,"100% done")))break;
+          if(w){struct InputEvent e;struct IEPointerPixel pos;struct Gadget *g,*chosen=NULL;
+            for(g=w->FirstGadget;g;g=g->NextGadget){
+                if(g->GadgetID==90)chosen=g;
+                if(g->GadgetText && g->GadgetText->IText && !strcmp((char *)g->GadgetText->IText,"Finish")){chosen=g;break;}
+            }
+            /* Installer askbool uses IDs 2/1 for left/right choices. */
+            if(!chosen && strstr((char *)w->Title,"100% done"))
+                for(g=w->FirstGadget;g;g=g->NextGadget)if(g->GadgetID==1){chosen=g;break;}
+            if(!chosen)continue;
+            memset(&e,0,sizeof(e));memset(&pos,0,sizeof(pos));pos.iepp_Screen=w->WScreen;
+            pos.iepp_Position.X=w->LeftEdge+chosen->LeftEdge+chosen->Width/2;
+            pos.iepp_Position.Y=w->TopEdge+chosen->TopEdge+chosen->Height/2;
             e.ie_Class=IECLASS_NEWPOINTERPOS;e.ie_SubClass=IESUBCLASS_PIXEL;e.ie_EventAddress=&pos;
             io->io_Command=IND_WRITEEVENT;io->io_Data=&e;io->io_Length=sizeof(e);DoIO((struct IORequest *)io);
             memset(&e,0,sizeof(e));e.ie_Class=IECLASS_RAWMOUSE;e.ie_Code=IECODE_LBUTTON;DoIO((struct IORequest *)io);
@@ -81,40 +92,131 @@ static int checks(void)
     if(!exists("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs"))QA(write_text("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs","workspace.installer_test=keep\nplugin.private.option=keep\n"));
     QA(write_text("RAM:AmiRocketInstallerQA/settings/volatile.prefs","old fallback"));
     prefs_hash=file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs");QA(prefs_hash!=0);
+    { ULONG flags=LDF_ASSIGNS|LDF_DEVICES|LDF_VOLUMES|LDF_READ;struct DosList *list=LockDosList(flags);
+      QA(list!=NULL);
+      if(list){QA(FindDosEntry(list,"AmiRocket",flags)==NULL);UnLockDosList(flags);}
+    }
+    puts("Installer QA: real Novice fresh-install flow without a drawer request");fflush(stdout);
+    QA(write_text("ENVARC:AmiRocket.prefs","interval=19\nplugin.custom.option=keep\nworkspace.install_dir=MissingAmiRocketDisk:OldInstall\n"));
+    QA(run_installer("NoviceFreshTest"));
+    QA(exists("RAM:AmiRocketInstallerQA/Auto/AmiRocket"));
+    QA(exists("RAM:AmiRocketInstallerQA/Data/Plugins/timestamp.arp"));
+    QA(!exists("RAM:AmiRocketInstallerQA/Auto/Plugins"));
+    QA(!exists("RAM:AmiRocketInstallerQA/Auto/ReadMe"));
+    QA(exists("RAM:AmiRocketInstallerQA/Help/AmiRocket.guide"));
+    QA(!exists("RAM:AmiRocketInstallerQA/Auto/AmiRocket.guide"));
     if(!run_installer("InstallTest")){puts("Initial Installer run did not complete; remaining checks skipped.");return 5;}
     QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket"));
-    QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket")==file_hash("AmiRocket:AmiRocket"));
-    QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocketPrefs")==file_hash("AmiRocket:AmiRocketPrefs"));
-    QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/timestamp.arp")==file_hash("AmiRocket:Plugins/timestamp.arp"));
+    QA(exists("RAM:AmiRocketInstallerQA/Prefs/AmiRocketPrefs"));
+    puts("Installer QA: custom icon drawers, spaces and assign roots");fflush(stdout);
+    root=CreateDir("RAM:AmiRocketInstallerQA/Custom Apps");QA(root!=0);if(root)UnLock(root);
+    root=CreateDir("RAM:AmiRocketInstallerQA/Custom Prefs");QA(root!=0);if(root)UnLock(root);
+    root=Lock("RAM:AmiRocketInstallerQA/Custom Apps",ACCESS_READ);QA(root && AssignLock("ARIconAppQA",root));
+    root=Lock("RAM:AmiRocketInstallerQA/Custom Prefs",ACCESS_READ);QA(root && AssignLock("ARIconPrefsQA",root));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons ARIconAppQA: ICONS ARIconPrefsQA:",NP_StackSize,131072,TAG_END)==0);
+    QA(exists("RAM:AmiRocketInstallerQA/Custom Apps/AmiRocket.info"));
+    QA(exists("RAM:AmiRocketInstallerQA/Custom Prefs/AmiRocketPrefs.info"));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons \"RAM:AmiRocketInstallerQA/Custom Apps/\" ICONS \"RAM:AmiRocketInstallerQA/Custom Prefs/\"",NP_StackSize,131072,TAG_END)==0);
+    AssignLock("ARIconAppQA",0);AssignLock("ARIconPrefsQA",0);
+    QA(!exists("RAM:AmiRocketInstallerQA/AmiRocket/Install"));
+    QA(!exists("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocketPrefs"));
+    QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket")==file_hash("ReleaseFiles:AmiRocket"));
+    QA(file_hash("RAM:AmiRocketInstallerQA/Prefs/AmiRocketPrefs")==file_hash("ReleaseFiles:AmiRocketPrefs"));
+    QA(file_hash("RAM:AmiRocketInstallerQA/Data/Plugins/timestamp.arp")==file_hash("ReleaseFiles:Plugins/timestamp.arp"));
     QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
-    QA(write_text("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/Custom.arp","keep this plugin"));
+    QA(write_text("RAM:AmiRocketInstallerQA/Data/Plugins/Custom.arp","keep this plugin"));
     QA(write_text("RAM:AmiRocketInstallerQA/AmiRocket/user-note.txt","keep this file"));
     IconBase=OpenLibrary("icon.library",39);QA(IconBase!=NULL);
     if(IconBase) { icon=GetDiskObject("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket");QA(icon!=NULL);if(icon){icon->do_CurrentX=121;QA(PutDiskObject("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket",icon));FreeDiskObject(icon);} }
     QA(write_text("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket","old binary"));
+    QA(write_text("RAM:AmiRocketInstallerQA/AmiRocket/Install","legacy installer"));
+    QA(write_text("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocketPrefs","legacy preferences"));
     held=Lock((STRPTR)dest,ACCESS_READ);QA(held!=0);
     puts("Installer QA: update with a Workbench drawer lock and custom files");fflush(stdout);
     QA(run_installer("InstallTest"));
-    QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket")==file_hash("AmiRocket:AmiRocket"));
+    QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket")==file_hash("ReleaseFiles:AmiRocket"));
     QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
     if(IconBase) { icon=GetDiskObject("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket");QA(icon&&icon->do_CurrentX==121);if(icon)FreeDiskObject(icon); }
     if(held)UnLock(held);
+    puts("Installer QA: recorded custom location and preserved plugin settings");fflush(stdout);
+    QA(write_text("ENVARC:AmiRocket.prefs","interval=19\nplugin.custom.option=keep\nnotification_sound=\n"));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/AmiRocket RECORD RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)==0);
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons DETECT",NP_StackSize,131072,TAG_END)==0);
+    { char found[512]={0};BPTR detected=0,expected=Lock((STRPTR)dest,ACCESS_READ);
+      QA(GetVar("AmiRocket-InstallDir",found,sizeof(found),GVF_GLOBAL_ONLY)>0);
+      detected=Lock(found,ACCESS_READ);QA(detected&&expected&&SameLock(detected,expected)==LOCK_SAME);
+      if(detected)UnLock(detected);
+      if(expected)UnLock(expected);
+    }
+    { BPTR f=Open("ENVARC:AmiRocket.prefs",MODE_OLDFILE);char settings[32768];LONG n=f?Read(f,settings,sizeof(settings)-1):0;
+      if(f)Close(f);
+      settings[n>0?n:0]=0;QA(strstr(settings,"interval=19")&&strstr(settings,"plugin.custom.option=keep")&&strstr(settings,"workspace.install_dir="));
+      QA(strstr(settings,"notification_sound=") && strstr(settings,"/Sounds/Notification.8svx"));
+      QA(exists("RAM:AmiRocketInstallerQA/Data/Sounds/Notification.8svx"));
+    }
+    QA(write_text("ENVARC:AmiRocket.prefs","interval=19\nplugin.custom.option=keep\nnotification_sound=T:personal.8svx\n"));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/AmiRocket RECORD RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)==0);
+    { BPTR f=Open("ENVARC:AmiRocket.prefs",MODE_OLDFILE);char settings[32768];LONG n=f?Read(f,settings,sizeof(settings)-1):0;
+      if(f)Close(f);
+      settings[n>0?n:0]=0;QA(strstr(settings,"notification_sound=T:personal.8svx")!=NULL);
+    }
+    puts("Installer QA: real Novice maintenance at the recorded custom location");fflush(stdout);
+    QA(run_installer("NoviceUpdateTest"));
+    QA(file_hash("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket")==file_hash("ReleaseFiles:AmiRocket"));
     puts("Installer QA: uninstall keeps settings and unrelated plugins");fflush(stdout);
     QA(run_installer("UninstallTest"));
     QA(!exists("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket"));
-    QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/Custom.arp"));
+    QA(!exists("RAM:AmiRocketInstallerQA/Prefs/AmiRocketPrefs"));
+    QA(exists("RAM:AmiRocketInstallerQA/Data/Plugins/Custom.arp"));
     QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/user-note.txt"));
     QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
     QA(exists("RAM:AmiRocketInstallerQA/settings/volatile.prefs"));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/AmiRocket RECORD RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)!=0);
+    /* Reproduce a shared Utilities drawer retaining the old AmiRocket drawer. */
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA RECORD RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)!=0);
     puts("Installer QA: reinstall, then uninstall with settings removal");fflush(stdout);
     QA(run_installer("InstallTest"));
     QA(file_hash("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs")==prefs_hash);
     QA(run_installer("UninstallRemoveTest"));
     QA(!exists("RAM:AmiRocketInstallerQA/AmiRocket/AmiRocket"));
+    QA(!exists("RAM:AmiRocketInstallerQA/Prefs/AmiRocketPrefs"));
     QA(!exists("RAM:AmiRocketInstallerQA/settings/AmiRocket.prefs"));
     QA(!exists("RAM:AmiRocketInstallerQA/settings/volatile.prefs"));
-    QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/Plugins/Custom.arp"));
+    QA(exists("RAM:AmiRocketInstallerQA/Data/Plugins/Custom.arp"));
     QA(exists("RAM:AmiRocketInstallerQA/AmiRocket/user-note.txt"));
+    puts("Installer QA: expert configuration migration and split Preferences");fflush(stdout);
+    root=CreateDir("RAM:AmiRocketInstallerQA/Config");if(root)UnLock(root);
+    QA(write_text("ENVARC:AmiRocket.prefs","interval=23\nplugin.custom.option=single-file\n"));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/Config/AmiRocket.prefs CONFIG",NP_StackSize,131072,TAG_END)==0);
+    QA(exists("RAM:AmiRocketInstallerQA/Config/AmiRocket.prefs") && !exists("ENVARC:AmiRocket.prefs"));
+    QA(run_installer("InstallTest"));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/AmiRocket RECORD RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)==0);
+    QA(SystemTags((CONST_STRPTR)"RAM:AmiRocketInstallerQA/Prefs/AmiRocketPrefs SELFTEST",NP_StackSize,131072,TAG_END)==0);
+    QA(run_installer("CustomUninstallKeepTest"));
+    QA(exists("RAM:AmiRocketInstallerQA/Config/AmiRocket.prefs") && !exists("RAM:AmiRocketInstallerQA/Prefs/AmiRocketPrefs"));
+    QA(run_installer("InstallTest"));
+    QA(run_installer("CustomUninstallRemoveTest"));
+    QA(!exists("RAM:AmiRocketInstallerQA/Config/AmiRocket.prefs") && !exists("RAM:AmiRocketInstallerQA/Prefs/AmiRocketPrefs"));
+    DeleteVar("AmiRocket-ConfigFile",GVF_GLOBAL_ONLY); DeleteFile("ENVARC:AmiRocket-ConfigFile");
+    puts("Installer QA: shared-data relocation and destination validation");fflush(stdout);
+    root=CreateDir("RAM:AmiRocketInstallerQA/ExpertData");if(root)UnLock(root);
+    QA(write_text("ENVARC:AmiRocket.prefs","workspace.data_dir=RAM:AmiRocketInstallerQA/Data\nplugin.custom.path=RAM:AmiRocketInstallerQA/Data/Plugins/Custom.arp\nnotification_sound=RAM:AmiRocketInstallerQA/Data/Sounds/Notification.8svx\n"));
+    QA(write_text("RAM:AmiRocketInstallerQA/Data/AmiRocket.drafts","preserve drafts"));
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/ExpertData DATA RAM:AmiRocketInstallerQA/AmiRocket RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)==0);
+    QA(exists("RAM:AmiRocketInstallerQA/ExpertData/Plugins/Custom.arp"));
+    QA(file_hash("RAM:AmiRocketInstallerQA/ExpertData/AmiRocket.drafts")==file_hash("RAM:AmiRocketInstallerQA/Data/AmiRocket.drafts"));
+    { BPTR f=Open("ENVARC:AmiRocket.prefs",MODE_OLDFILE);char text[32768];LONG n=f?Read(f,text,sizeof(text)-1):0;if(f)Close(f);text[n>0?n:0]=0;
+      QA(strstr(text,"/ExpertData\n")!=NULL);
+      QA(strstr(text,"/ExpertData/Plugins/Custom.arp")!=NULL);
+    }
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/AmiRocket DATA-CHECK RAM:AmiRocketInstallerQA/AmiRocket RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)!=0);
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons ReleaseFiles: DATA-CHECK RAM:AmiRocketInstallerQA/AmiRocket RAM:AmiRocketInstallerQA/Prefs",NP_StackSize,131072,TAG_END)!=0);
+    puts("Installer QA: optional one-time client launch");fflush(stdout);
+    root=CreateDir("RAM:AmiRocketInstallerQA/LaunchTest");if(root)UnLock(root);
+    QA(SystemTags((CONST_STRPTR)"Copy QATools:LaunchQA TO RAM:AmiRocketInstallerQA/LaunchTest/AmiRocket",NP_StackSize,131072,TAG_END)==0);
+    DeleteFile("T:AmiRocket-launch-qa.done");
+    QA(SystemTags((CONST_STRPTR)"ReleaseFiles:CreateIcons RAM:AmiRocketInstallerQA/LaunchTest START",NP_StackSize,131072,TAG_END)==0);
+    { int tick; for(tick=0;tick<100 && !exists("T:AmiRocket-launch-qa.done");tick++)Delay(2); QA(exists("T:AmiRocket-launch-qa.done")); }
     if(IconBase)CloseLibrary(IconBase);
     if(IntuitionBase)CloseLibrary((struct Library *)IntuitionBase);
     printf("Installer checks: %d passed, %d failed\n",passed,failed);return failed?5:0;
