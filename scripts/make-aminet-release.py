@@ -25,7 +25,9 @@ INSTALLATION
 Unpack {archive_name}, open the AmiRocket drawer and double-click Install.
 Novice mode detects installed copies and offers Update or Uninstall. New
 installs use SYS:Utilities. Advanced modes allow another drawer.
-AmiRocketPrefs stays beside the client. Existing ENVARC:AmiRocket.prefs and custom plugins are preserved.
+AmiRocketPrefs installs in SYS:Prefs; the manual installs in HELP:. Shared
+resources use SYS:AmiRocket. Expert mode can choose other shared-data and
+configuration drawers. Existing settings and custom plugins are preserved.
 Launch the client from Workbench. Close the client and Preferences before updating.
 Existing copies offer Update or Uninstall. Uninstall lets you keep settings
 (default) or remove the shared configuration. Custom files/plugins are kept.
@@ -38,7 +40,8 @@ build scripts and tests. The plugin SDK is a separate versioned ZIP.
 No personal settings or credentials are included in these archives.
 
 LIMITS
-This release uses polling, Latin-1 text with readable Unicode fallbacks,
+This release uses realtime WebSocket updates with polling fallback,
+Latin-1 text with readable Unicode fallbacks,
 a maximum 8 MiB download size and 2 MiB encoded inline preview size.
 Server permissions still apply. Teams/discussions are not implemented.
 Hardware/runtime testing is separate from a successful release build.
